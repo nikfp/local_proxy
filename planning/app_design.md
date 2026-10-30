@@ -295,6 +295,9 @@ The auth key and decrypted headers are never logged.
   injected credentials are only as protected as the machine.
 - Inbound loopback validation prevents the public tunnel from reaching LAN or
   internet hosts.
+- A tunnel that forwards the whole hostname also exposes outbound `/r/...`
+  routes, which have no auth. Tunnel ingress must be restricted to inbound
+  prefixes (or outbound routes moved behind a separate listener).
 - `encrypt_nil? false` keeps `encrypted_headers` meaningful for future cleanup
   tasks.
 - Changing `CLOAK_KEY` makes existing headers unreadable. There is no rotation

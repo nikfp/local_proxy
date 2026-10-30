@@ -20,4 +20,26 @@ defmodule LocalProxy.Routing do
       define :destroy_route, action: :destroy
     end
   end
+
+  @doc """
+  Returns the enabled inbound route with the longest matching path prefix.
+
+  Matching is segment-aware: `/api` matches `/api` and `/api/users`, but not
+  `/apix`. Returns `nil` when nothing matches.
+  """
+  def get_inbound_route(path) when is_binary(path) do
+    require Ash.Query
+
+    LocalProxy.Routing.Route
+    |> Ash.Query.filter(direction == :inbound and enabled == true)
+    |> Ash.read!(domain: __MODULE__)
+    |> Enum.filter(&prefix_match?(&1.path_prefix, path))
+    |> Enum.max_by(&byte_size(&1.path_prefix), fn -> nil end)
+  end
+
+  defp prefix_match?(prefix, path) when is_binary(prefix) do
+    path == prefix or String.starts_with?(path, prefix <> "/")
+  end
+
+  defp prefix_match?(_prefix, _path), do: false
 end

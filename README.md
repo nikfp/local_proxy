@@ -81,6 +81,20 @@ Point the public hostname at `http://127.0.0.1:<PORT>` (default `4000`) and add
 the `X-Proxy-Key` header to inbound requests. Inbound target URLs must be
 loopback (`localhost`, `127.0.0.0/8`, or `::1`).
 
+An inbound route with prefix `/api` and target `http://localhost:3000` maps:
+
+- `/api` -> `http://localhost:3000/`
+- `/api/users?x=1` -> `http://localhost:3000/users?x=1`
+
+Any request that does not match an inbound prefix returns 404. Requests with a
+missing or wrong key get 401 before a target is contacted.
+
+**Restrict the tunnel's ingress paths to your inbound prefixes.** The app binds
+to loopback, but a tunnel that forwards the whole hostname also exposes `/r`,
+which is intentionally unauthenticated for local callers. Configure tunnel
+ingress rules so only inbound prefixes reach this app, or put the outbound
+routes behind a separate listener.
+
 ## Tests
 
 ```sh

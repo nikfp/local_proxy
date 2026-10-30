@@ -1,6 +1,9 @@
 defmodule LocalProxyWeb.ProxyController do
   @moduledoc """
-  Entry point for outbound proxy requests (`/r/:slug/...`).
+  Entry point for proxy requests.
+
+  Outbound requests use `/r/:slug/...`. Everything else falls through to the
+  inbound handler, which matches enabled inbound routes by path prefix.
   """
 
   use LocalProxyWeb, :controller
@@ -8,27 +11,52 @@ defmodule LocalProxyWeb.ProxyController do
   alias LocalProxy.Proxy
   alias LocalProxy.Proxy.Request
   alias LocalProxy.Routing
+  alias LocalProxy.Routing.Loopback
   alias LocalProxy.Routing.Route
 
   @disallowed_methods ~w(CONNECT TRACE)
   @allowed_methods "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
 
   def outbound(conn, %{"slug" => slug} = params) do
-    cond do
-      conn.method in @disallowed_methods ->
-        conn
-        |> put_resp_header("allow", @allowed_methods)
-        |> error(405, "method_not_allowed")
+    if disallowed_method?(conn) do
+      method_not_allowed(conn)
+    else
+      case outbound_route(slug) do
+        nil ->
+          error(conn, 404, "no_route")
 
-      true ->
-        case outbound_route(slug) do
-          nil ->
-            error(conn, 404, "no_route")
-
-          %Route{} = route ->
-            read_body_and_forward(conn, route, params)
-        end
+        %Route{} = route ->
+          forward_request(conn, route, suffix_path(params))
+      end
     end
+  end
+
+  def inbound(conn, %{"path" => segments}) do
+    path = inbound_path(segments)
+
+    if disallowed_method?(conn) do
+      method_not_allowed(conn)
+    else
+      case Routing.get_inbound_route(path) do
+        nil ->
+          error(conn, 404, "no_route")
+
+        %Route{} = route ->
+          if loopback_target?(route) do
+            forward_request(conn, route, strip_prefix(path, route.path_prefix))
+          else
+            error(conn, 502, "upstream_unreachable", route)
+          end
+      end
+    end
+  end
+
+  defp disallowed_method?(conn), do: conn.method in @disallowed_methods
+
+  defp method_not_allowed(conn) do
+    conn
+    |> put_resp_header("allow", @allowed_methods)
+    |> error(405, "method_not_allowed")
   end
 
   defp outbound_route(slug) do
@@ -39,12 +67,19 @@ defmodule LocalProxyWeb.ProxyController do
     end
   end
 
-  defp read_body_and_forward(conn, route, params) do
+  defp loopback_target?(%Route{target_url: target_url}) do
+    case URI.parse(target_url) do
+      %URI{host: host} when is_binary(host) -> Loopback.resolve_loopback(host) == :ok
+      _ -> false
+    end
+  end
+
+  defp forward_request(conn, route, path_suffix) do
     case read_request_body(conn) do
       {:ok, body, conn} ->
         request = %Request{
           method: conn.method,
-          path: suffix_path(params),
+          path: path_suffix,
           query: conn.query_string,
           headers: conn.req_headers,
           body: body
@@ -79,6 +114,20 @@ defmodule LocalProxyWeb.ProxyController do
   end
 
   defp suffix_path(_params), do: "/"
+
+  defp inbound_path(segments) when is_list(segments) do
+    case Enum.reject(segments, &(&1 == "")) do
+      [] -> "/"
+      segments -> "/" <> Enum.join(segments, "/")
+    end
+  end
+
+  defp strip_prefix(path, prefix) do
+    case path do
+      ^prefix -> "/"
+      _ -> String.replace_prefix(path, prefix, "")
+    end
+  end
 
   defp respond(conn, _route, {:ok, %Proxy.Result{} = result}) do
     conn =
