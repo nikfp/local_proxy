@@ -16,6 +16,7 @@ defmodule LocalProxyWeb.RouteLive.Index do
      |> assign(:direction, "all")
      |> assign(:enabled, "all")
      |> assign(:test_results, %{})
+     |> assign_base_url()
      |> assign_routes()}
   end
 
@@ -96,6 +97,32 @@ defmodule LocalProxyWeb.RouteLive.Index do
     end
   end
 
+  defp assign_base_url(socket) do
+    uri = socket.host_uri || URI.parse(LocalProxyWeb.Endpoint.url())
+    port = uri.port || endpoint_port()
+
+    uri = %{
+      uri
+      | scheme: uri.scheme || "http",
+        host: uri.host || "localhost",
+        port: port,
+        path: nil,
+        query: nil,
+        fragment: nil
+    }
+
+    assign(socket, :base_url, URI.to_string(uri))
+  end
+
+  defp endpoint_port do
+    :local_proxy
+    |> Application.get_env(LocalProxyWeb.Endpoint, [])
+    |> Keyword.get(:http, [])
+    |> Keyword.get(:port)
+  end
+
+  defp outbound_url(base_url, route), do: "#{base_url}/r/#{route.slug}"
+
   defp assign_routes(socket) do
     routes =
       Routing.list_routes!()
@@ -122,6 +149,10 @@ defmodule LocalProxyWeb.RouteLive.Index do
         Routes
         <:subtitle>Forward requests with injected headers, outbound or inbound.</:subtitle>
         <:actions>
+          <form action={~p"/logout"} method="post" class="inline">
+            <input type="hidden" name="_csrf_token" value={Phoenix.Controller.get_csrf_token()} />
+            <button type="submit" class="btn btn-ghost">Sign out</button>
+          </form>
           <.button navigate={~p"/routes/new"} variant="primary">
             <.icon name="hero-plus" class="size-4" /> New route
           </.button>
@@ -189,6 +220,18 @@ defmodule LocalProxyWeb.RouteLive.Index do
             </div>
 
             <div class="flex items-center gap-2">
+              <.button
+                :if={route.direction == :outbound}
+                id={"copy-link-#{route.id}"}
+                type="button"
+                class="btn btn-sm btn-ghost"
+                phx-hook="CopyToClipboard"
+                data-copy={outbound_url(@base_url, route)}
+                aria-label={"Copy outbound URL for #{route.name}"}
+              >
+                <.icon name="hero-clipboard" class="size-4" />
+                <span data-copy-label>Copy link</span>
+              </.button>
               <.button
                 type="button"
                 class="btn btn-sm btn-ghost"

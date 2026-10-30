@@ -199,8 +199,8 @@ defmodule LocalProxyWeb.RouteLive.Form do
       <.header>
         {@page_title}
         <:subtitle>
-          Outbound routes are called at <code class="font-mono">/r/&lt;slug&gt;</code>.
-          Inbound routes match a path prefix from the tunnel.
+          Outbound routes are a local entry point for API calls. Inbound routes
+          are reached through the tunnel and require a path prefix.
         </:subtitle>
         <:actions>
           <.button navigate={~p"/routes"} variant="primary">
@@ -208,6 +208,51 @@ defmodule LocalProxyWeb.RouteLive.Form do
           </.button>
         </:actions>
       </.header>
+
+      <div class="grid gap-3 rounded-xl border border-base-300 bg-base-200/40 p-4 text-sm sm:grid-cols-2">
+        <div class="grid gap-1">
+          <h2 class="font-semibold">Outbound</h2>
+          <p class="text-base-content/70">
+            Callers use <code class="font-mono">&lt;base&gt;/r/&lt;slug&gt;/...</code>.
+            The path after the slug and the query string are appended to the target,
+            and the route's headers are injected on every call. The target URL is
+            never exposed to the caller.
+          </p>
+          <p class="text-base-content/70">
+            HTML is returned unchanged. CSS, JS, images, and links are not rewritten
+            or fetched through the proxy, so browsing a website through an outbound
+            route will render without its assets. Use outbound routes for API
+            endpoints, not pages you intend to view in a browser.
+          </p>
+        </div>
+
+        <div class="grid gap-1">
+          <h2 class="font-semibold">Inbound</h2>
+          <p class="text-base-content/70">
+            Requests through the tunnel are matched by the path prefix. This is
+            required and cannot be <code class="font-mono">/</code>, since that would
+            capture every tunnel request. The prefix is stripped, the remaining path
+            and query are appended to the target, and the route's headers are
+            injected.
+          </p>
+          <div class="mt-2 grid gap-1 rounded-lg border border-base-300 bg-base-100 p-3 font-mono text-xs">
+            <p class="font-sans text-base-content/50">
+              Example: prefix <code class="font-mono">/api</code>, target
+              <code class="font-mono">http://localhost:3000</code>
+            </p>
+            <p>Caller sends: <span class="text-primary">GET /api/users?x=1</span></p>
+            <p>Local server gets: <span class="text-primary">GET /users?x=1</span></p>
+            <p>Caller sends: <span class="text-primary">GET /api</span></p>
+            <p>Local server gets: <span class="text-primary">GET /</span></p>
+          </div>
+          <p class="text-base-content/70">
+            Inbound targets must be loopback addresses. Callers must send the shared
+            <code class="font-mono">X-Proxy-Key</code>
+            header. Paths outside the
+            configured prefix return 404.
+          </p>
+        </div>
+      </div>
 
       <.form
         for={@form}
@@ -246,9 +291,13 @@ defmodule LocalProxyWeb.RouteLive.Form do
             field={@form[:path_prefix]}
             label="Path prefix"
             placeholder="/api"
+            required
           />
           <p class="-mt-1 text-xs text-base-content/60">
-            Matched as a path segment. The prefix is stripped before forwarding.
+            Required for inbound routes. Matched as a path segment and stripped
+            before forwarding. <code class="font-mono">/</code>
+            is not allowed because it would capture every tunnel request and leave
+            no unmatched path.
           </p>
         </div>
 

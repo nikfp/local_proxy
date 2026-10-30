@@ -43,3 +43,6 @@ npm-debug.log
 .env
 
 .envrc
+.erl.history/erlang-shell-log.1
+.erl.history/erlang-shell-log.idx
+.erl.history/erlang-shell-log.siz

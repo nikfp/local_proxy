@@ -1,0 +1,38 @@
+<Layouts.app flash={@flash}>
+  <div class="mx-auto w-full max-w-sm">
+    <div class="rounded-xl border border-base-300 bg-base-100 p-6 shadow-sm">
+      <h1 class="text-lg font-semibold">Sign in</h1>
+      <p class="mt-1 text-sm text-base-content/60">
+        Use the admin credentials configured on this machine.
+      </p>
+
+      <form action={~p"/login"} method="post" class="mt-6 grid gap-4">
+        <input type="hidden" name="_csrf_token" value={@csrf_token} />
+
+        <.input
+          id="session-username"
+          name="session[username]"
+          label="Username"
+          value=""
+          autocomplete="username"
+          required
+          autofocus
+        />
+
+        <.input
+          id="session-password"
+          name="session[password]"
+          type="password"
+          label="Password"
+          value=""
+          autocomplete="current-password"
+          required
+        />
+
+        <p :if={@error} class="text-sm text-error">{@error}</p>
+
+        <button type="submit" class="btn btn-primary w-full">Sign in</button>
+      </form>
+    </div>
+  </div>
+</Layouts.app>

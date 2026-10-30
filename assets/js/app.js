@@ -26,10 +26,53 @@ import {hooks as colocatedHooks} from "phoenix-colocated/local_proxy"
 import topbar from "../vendor/topbar"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+
+const CopyToClipboard = {
+  mounted() {
+    this.handler = () => {
+      const text = this.el.dataset.copy
+      const label = this.el.querySelector("[data-copy-label]")
+      const showCopied = () => {
+        if (!label) return
+        const original = label.textContent
+        label.textContent = "Copied"
+        setTimeout(() => { label.textContent = original }, 1200)
+      }
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied).catch(() => this.fallback(text, showCopied))
+      } else {
+        this.fallback(text, showCopied)
+      }
+    }
+
+    this.el.addEventListener("click", this.handler)
+  },
+  destroyed() {
+    this.el.removeEventListener("click", this.handler)
+  },
+  fallback(text, done) {
+    const textarea = document.createElement("textarea")
+    textarea.value = text
+    textarea.setAttribute("readonly", "")
+    textarea.style.position = "fixed"
+    textarea.style.opacity = "0"
+    document.body.appendChild(textarea)
+    textarea.select()
+
+    try {
+      document.execCommand("copy")
+      done()
+    } finally {
+      document.body.removeChild(textarea)
+    }
+  }
+}
+
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, CopyToClipboard},
 })
 
 // Show progress bar on live navigation and form submits

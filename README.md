@@ -9,8 +9,9 @@ A loopback-bound proxy with two directions and two listeners:
   `X-Proxy-Key` are matched by path prefix and forwarded to a local service.
 
 Route configuration lives at `/routes` and AshAdmin at `/admin`, both on
-`OUTBOUND_PORT`. Both require HTTP basic auth. The inbound listener exposes only
-`/health` and the inbound catch-all; it cannot reach the UI, admin, or `/r`.
+`OUTBOUND_PORT`. Both require a session sign-in. The inbound listener exposes
+only `/health` and the inbound catch-all; it cannot reach the UI, admin, or
+`/r`.
 
 ## Requirements
 
@@ -35,8 +36,8 @@ directly.
   Changing this key makes existing stored headers unreadable. Back it up.
 - `INBOUND_PROXY_KEY` — shared key for inbound requests. Callers send it as
   `X-Proxy-Key`.
-- `ADMIN_USER` — basic auth user for `/routes` and `/admin`.
-- `ADMIN_PASSWORD` — basic auth password for `/routes` and `/admin`.
+- `ADMIN_USER` — sign-in user for `/routes` and `/admin`.
+- `ADMIN_PASSWORD` — sign-in password for `/routes` and `/admin`.
 
 Tests use fixed fixture values and do not require these variables.
 
@@ -79,8 +80,11 @@ mix phx.server
 builds assets.
 
 Open the UI at [`http://localhost:4000/routes`](http://localhost:4000/routes),
-replacing the port if `OUTBOUND_PORT` is set. `GET /health` is unauthenticated on
-both listeners and returns `{"status":"ok"}`.
+replacing the port if `OUTBOUND_PORT` is set. You will be redirected to
+`/login`; sign in with `ADMIN_USER` and `ADMIN_PASSWORD`. `GET /health` is
+unauthenticated on both listeners and returns `{"status":"ok"}`.
+
+The session is a signed cookie. Use **Sign out** on `/routes` to clear it.
 
 ## Outbound routes
 

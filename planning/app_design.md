@@ -44,7 +44,7 @@ two directions.
 - No request history in the database. Logs contain route, method, path, status,
   and timing only.
 - Custom LiveViews for route management, AshAdmin kept at `/admin`. Both sit
-  behind HTTP basic auth from env vars.
+  behind a session sign-in using `ADMIN_USER` and `ADMIN_PASSWORD`.
 - Root `/` redirects to `/routes`. `GET /health` is unauthenticated.
 - Secrets fail fast at boot in dev and prod. Test uses fixed fixture values.
 - Build order: data model and UI, then outbound, then inbound.
@@ -53,7 +53,7 @@ two directions.
 
 ```
 Local app ──► 127.0.0.1:<OUTBOUND_PORT>/r/:slug/... ──► Proxy.forward ──► external URL
-Browser ────► 127.0.0.1:<OUTBOUND_PORT>/routes       ──► basic auth ─► RouteLive
+Browser ────► 127.0.0.1:<OUTBOUND_PORT>/routes       ──► sign-in ──► RouteLive
 Cloudflare ─► tunnel ─► 127.0.0.1:<INBOUND_PORT>/*   ──► InboundAuth ─► Proxy.forward ─► localhost
 ```
 
@@ -72,7 +72,8 @@ policy, and the listening endpoint differ.
 - `LocalProxy.Routing.Route` — the route resource.
 - `LocalProxy.Proxy` — path rewrite, header merge, Req call, error mapping.
 - `LocalProxy.Proxy.Result` — status, headers, body, duration in ms.
-- `LocalProxyWeb.Plugs.BasicAuth` — admin/UI basic auth.
+- `LocalProxyWeb.Plugs.RequireAuth` — redirects unauthenticated UI requests.
+- `LocalProxyWeb.SessionController` — sign-in and sign-out.
 - `LocalProxyWeb.Plugs.InboundAuth` — `X-Proxy-Key` check.
 - `LocalProxyWeb.ProxyController` — dispatches outbound and inbound requests.
 - `LocalProxyWeb.InboundEndpoint` — listener used by the tunnel.
@@ -121,8 +122,8 @@ Validations and identities:
   result to be loopback. Reject anything else with a clear error.
 
 Actions: `read`, `create`, `update`, `destroy`. No Ash policies; the operator is
-single-user and the UI is protected by basic auth. AshAdmin is likewise behind
-basic auth.
+single-user and the UI is protected by a session sign-in. AshAdmin is likewise
+behind the sign-in.
 
 ### Encryption
 
@@ -153,7 +154,7 @@ Required at boot in every environment except `test` (which uses fixed fixtures):
 
 - `CLOAK_KEY` — base64-encoded 32-byte AES key.
 - `INBOUND_PROXY_KEY` — shared key for inbound requests.
-- `ADMIN_USER`, `ADMIN_PASSWORD` — basic auth for `/routes` and `/admin`.
+- `ADMIN_USER`, `ADMIN_PASSWORD` — sign-in for `/routes` and `/admin`.
 
 Optional:
 
@@ -183,9 +184,11 @@ Local listener (`OUTBOUND_PORT`, never tunneled):
 
 - `GET /health` — no pipeline, returns 200 `{"status":"ok"}`.
 - `GET /` — browser pipeline, redirects to `/routes`.
-- `/routes`, `/routes/new`, `/routes/:id/edit` — browser pipeline plus basic
-  auth, LiveViews.
-- `/admin` — browser pipeline plus basic auth, AshAdmin.
+- `GET /login`, `POST /login` — sign-in form and credential check.
+- `POST /logout` — clears the session.
+- `/routes`, `/routes/new`, `/routes/:id/edit` — browser pipeline plus
+  `RequireAuth`, LiveViews.
+- `/admin` — browser pipeline plus `RequireAuth`, AshAdmin.
 - `match /r/:slug` and `/r/:slug/*rest` — proxy, outbound forwarder.
 - `/live` — LiveView socket.
 
@@ -314,8 +317,9 @@ The auth key and decrypted headers are never logged.
   Changing either bind address requires reconsidering this.
 - The two listeners are the boundary: the outbound listener is never exposed by
   the tunnel, so `X-Proxy-Key` is not needed on `/r`.
-- Basic auth is only as strong as the password; the tunnel terminates TLS, and
-  local access is plain HTTP on loopback.
+- The session cookie is only as strong as the password; the tunnel terminates
+  TLS, and local access is plain HTTP on loopback. The cookie is signed with
+  `SECRET_KEY_BASE`.
 - Injected headers can be triggered by anything that can reach loopback, so the
   injected credentials are only as protected as the machine.
 - Inbound loopback validation prevents the public tunnel from reaching LAN or
@@ -381,7 +385,8 @@ LiveView:
 - Add `LocalProxy.Vault`, wire it into the supervision tree.
 - Add `LocalProxy.Routing.Route` and the Ash domain, with migration.
 - Add validations, identities, and AshCloak configuration.
-- Add basic auth plug and mount `/routes` LiveViews; protect `/admin`.
+- Add the session sign-in plug and controllers, mount `/routes` LiveViews, and
+  protect `/admin`.
 - Add `/health` and the root redirect.
 - Add the local endpoint and the `LocalProxyWeb.InboundEndpoint`, configured
   with `OUTBOUND_PORT` (default 4000) and `INBOUND_PORT` (default 4001) in

@@ -13,7 +13,7 @@ defmodule LocalProxyWeb.RouteLiveTest do
   }
 
   defp authed_conn(conn) do
-    put_req_header(conn, "authorization", "Basic " <> Base.encode64("admin:password"))
+    init_test_session(conn, %{admin_authenticated: true})
   end
 
   defp create_route(attrs \\ %{}) do
@@ -147,6 +147,24 @@ defmodule LocalProxyWeb.RouteLiveTest do
 
     view |> element("button[phx-click=delete]") |> render_click()
     assert Routing.list_routes!() == []
+  end
+
+  test "shows a copy link for outbound routes only", %{conn: conn} do
+    create_route()
+
+    Routing.create_route!(%{
+      name: "Local",
+      direction: :inbound,
+      path_prefix: "/api",
+      target_url: "http://localhost:3000"
+    })
+
+    {:ok, _view, html} = live(authed_conn(conn), ~p"/routes")
+
+    assert html =~ ~r/data-copy="http:\/\/[^"]+\/r\/github"/
+    assert html =~ ~r/id="copy-link-[^"]+"/
+    assert html =~ ~r/name="_csrf_token" value="[^"]+"/
+    assert length(Regex.scan(~r/data-copy=/, html)) == 1
   end
 
   test "the test button shows the stubbed upstream response", %{conn: conn} do

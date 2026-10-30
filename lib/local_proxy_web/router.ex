@@ -14,14 +14,15 @@ defmodule LocalProxyWeb.Router do
     plug Plug.MethodOverride
     plug Plug.Head
     plug :fetch_session
+    plug :fetch_flash
     plug :fetch_live_flash
     plug :put_root_layout, html: {LocalProxyWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
   end
 
-  pipeline :admin_auth do
-    plug LocalProxyWeb.Plugs.BasicAuth
+  pipeline :require_auth do
+    plug LocalProxyWeb.Plugs.RequireAuth
   end
 
   pipeline :api do
@@ -36,10 +37,13 @@ defmodule LocalProxyWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    get "/login", SessionController, :new
+    post "/login", SessionController, :create
+    post "/logout", SessionController, :delete
   end
 
   scope "/", LocalProxyWeb do
-    pipe_through [:browser, :admin_auth]
+    pipe_through [:browser, :require_auth]
 
     live "/routes", RouteLive.Index, :index
     live "/routes/new", RouteLive.Form, :new
@@ -52,7 +56,7 @@ defmodule LocalProxyWeb.Router do
   end
 
   scope "/" do
-    pipe_through [:browser, :admin_auth]
+    pipe_through [:browser, :require_auth]
 
     import AshAdmin.Router
     ash_admin "/admin"
