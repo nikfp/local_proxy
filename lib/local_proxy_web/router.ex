@@ -24,10 +24,6 @@ defmodule LocalProxyWeb.Router do
     plug LocalProxyWeb.Plugs.BasicAuth
   end
 
-  pipeline :inbound_auth do
-    plug LocalProxyWeb.Plugs.InboundAuth
-  end
-
   pipeline :api do
     plug :accepts, ["json"]
   end
@@ -72,13 +68,5 @@ defmodule LocalProxyWeb.Router do
       live_dashboard "/dashboard", metrics: LocalProxyWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
     end
-  end
-
-  # Inbound catch-all. Keep this last so routes, admin, assets, and LiveView
-  # paths above are never proxied.
-  scope "/", LocalProxyWeb do
-    pipe_through :inbound_auth
-
-    match :*, "/*path", ProxyController, :inbound
   end
 end

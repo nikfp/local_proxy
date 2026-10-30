@@ -22,7 +22,13 @@ two directions.
 - Inbound auth is a single shared key in `X-Proxy-Key`, compared against
   `INBOUND_PROXY_KEY` before route lookup. The header is stripped before
   forwarding.
-- Outbound requires no auth because the app binds to `127.0.0.1` only.
+- Outbound requires no auth because the outbound listener binds to `127.0.0.1`
+  and is never exposed through the tunnel.
+- Two listeners: a local listener for outbound routes and the UI, and an
+  inbound listener for tunnel traffic. The Cloudflare tunnel points only at the
+  inbound listener.
+- The UI and AshAdmin are served only by the local listener. The inbound
+  listener has no UI, admin, or outbound routes.
 - Inbound targets must be loopback; outbound targets may be any `http`/`https`
   URL.
 - Header injection is static key/value pairs. The route's value wins over an
@@ -46,13 +52,18 @@ two directions.
 ## Architecture
 
 ```
-Local app ──► 127.0.0.1:<PORT>/r/:slug/... ──► Proxy.forward ──► external URL
-Cloudflare ─► tunnel ─► 127.0.0.1:<PORT>/* ──► InboundAuth ─► Proxy.forward ─► localhost
-Browser ────► 127.0.0.1:<PORT>/routes      ──► basic auth ─► RouteLive
+Local app ──► 127.0.0.1:<OUTBOUND_PORT>/r/:slug/... ──► Proxy.forward ──► external URL
+Browser ────► 127.0.0.1:<OUTBOUND_PORT>/routes       ──► basic auth ─► RouteLive
+Cloudflare ─► tunnel ─► 127.0.0.1:<INBOUND_PORT>/*   ──► InboundAuth ─► Proxy.forward ─► localhost
 ```
 
-The forwarder is shared by both directions. Only route lookup, auth, and target
-policy differ.
+Two Phoenix endpoints run in one VM. `LocalProxyWeb.Endpoint` listens on the
+outbound port and serves `/r`, `/routes`, `/admin`, `/health`, and `/`.
+`LocalProxyWeb.InboundEndpoint` listens on the inbound port and serves only the
+authenticated inbound catch-all plus `/health`. Both bind to loopback.
+
+The forwarder is shared by both directions. Only route lookup, auth, target
+policy, and the listening endpoint differ.
 
 ### Modules
 
@@ -64,6 +75,8 @@ policy differ.
 - `LocalProxyWeb.Plugs.BasicAuth` — admin/UI basic auth.
 - `LocalProxyWeb.Plugs.InboundAuth` — `X-Proxy-Key` check.
 - `LocalProxyWeb.ProxyController` — dispatches outbound and inbound requests.
+- `LocalProxyWeb.InboundEndpoint` — listener used by the tunnel.
+- `LocalProxyWeb.InboundRouter` — health plus authenticated inbound catch-all.
 - `LocalProxyWeb.RouteLive.Index` and `RouteLive.Form` — config UI.
 - `LocalProxyWeb.HealthController` — `GET /health`.
 
@@ -144,25 +157,29 @@ Required at boot in every environment except `test` (which uses fixed fixtures):
 
 Optional:
 
-- `PORT` — listen port, default `4000`. Parsed as an integer, must be 1–65535;
-  an invalid value fails at boot with a clear message. Applies in dev and prod
-  via `config/runtime.exs`, so a local start can move off 4000 without editing
-  config. The bind address stays loopback. Anything pointing at the app
-  (browser, outbound callers, Cloudflare tunnel origin) must use the configured
-  port.
+- `OUTBOUND_PORT` — local listener, default `4000`. Parsed as an integer, must
+  be 1–65535; an invalid value fails at boot with a clear message. Serves the
+  UI, admin, `/health`, and outbound `/r` routes. Browsers and local callers use
+  this port.
+- `INBOUND_PORT` — tunnel listener, default `4001`. Same validation. Serves only
+  `/health` and the inbound catch-all. The Cloudflare tunnel origin points
+  here.
 - `UPSTREAM_TIMEOUT_MS` — default `30000`.
 - `MAX_BODY_BYTES` — default `10485760`.
 - `DATABASE_PATH`, `SECRET_KEY_BASE` — prod only, already used by
   `config/runtime.exs`.
 
-Binding is `{127, 0, 0, 1}` in dev and prod; `PORT` changes the port only.
-Secrets are exported in the shell; README documents the exports. No `.env`
-loader and no generated defaults.
+Both listeners bind to `{127, 0, 0, 1}` in dev and prod. The two ports must
+differ; boot fails with a clear message otherwise. Ports only change the listen
+ports. Secrets are exported in the shell; README documents the exports. No
+`.env` loader and no generated defaults.
 
 `runtime.exs` stores validated values in application env, so request-time code
 does not re-read the environment.
 
 ## Routing table
+
+Local listener (`OUTBOUND_PORT`, never tunneled):
 
 - `GET /health` — no pipeline, returns 200 `{"status":"ok"}`.
 - `GET /` — browser pipeline, redirects to `/routes`.
@@ -170,12 +187,17 @@ does not re-read the environment.
   auth, LiveViews.
 - `/admin` — browser pipeline plus basic auth, AshAdmin.
 - `match /r/:slug` and `/r/:slug/*rest` — proxy, outbound forwarder.
-- `match /*path` — proxy, inbound forwarder.
-- `/live` — LiveView socket, never proxied.
+- `/live` — LiveView socket.
 
-The inbound catch-all is declared last. Static assets and `/favicon.ico` are
-served by the endpoint before the router. Root `/` and `/health` are never
-proxied.
+Inbound listener (`INBOUND_PORT`, the tunnel origin):
+
+- `GET /health` — no pipeline, returns 200 `{"status":"ok"}`.
+- `match /*path` — `InboundAuth`, then the inbound forwarder.
+
+The inbound listener has no UI, admin, static assets, LiveView socket, or
+outbound `/r` routes. A tunnel request to `/r/...` or `/routes` matches the
+catch-all, passes auth only if the key is present, and then returns 404 because
+no inbound prefix matches.
 
 ## Request flow
 
@@ -288,16 +310,16 @@ The auth key and decrypted headers are never logged.
 ## Security notes
 
 - Binding to loopback is what makes unauthenticated outbound routes acceptable.
-  Changing the bind address requires adding auth to outbound routes.
+  The tunnel points only at the inbound listener, which has no `/r` routes.
+  Changing either bind address requires reconsidering this.
+- The two listeners are the boundary: the outbound listener is never exposed by
+  the tunnel, so `X-Proxy-Key` is not needed on `/r`.
 - Basic auth is only as strong as the password; the tunnel terminates TLS, and
   local access is plain HTTP on loopback.
 - Injected headers can be triggered by anything that can reach loopback, so the
   injected credentials are only as protected as the machine.
 - Inbound loopback validation prevents the public tunnel from reaching LAN or
   internet hosts.
-- A tunnel that forwards the whole hostname also exposes outbound `/r/...`
-  routes, which have no auth. Tunnel ingress must be restricted to inbound
-  prefixes (or outbound routes moved behind a separate listener).
 - `encrypt_nil? false` keeps `encrypted_headers` meaningful for future cleanup
   tasks.
 - Changing `CLOAK_KEY` makes existing headers unreadable. There is no rotation
@@ -320,8 +342,14 @@ Data and encryption:
 
 Configuration:
 
-- `PORT` defaults to 4000, accepts a valid integer, and rejects non-numeric or
-  out-of-range values at boot.
+- `OUTBOUND_PORT` defaults to 4000 and `INBOUND_PORT` to 4001; both accept a
+  valid integer and reject non-numeric or out-of-range values at boot.
+
+Listener isolation:
+
+- The local listener does not serve the inbound catch-all.
+- The inbound listener returns 404 for `/r/...`, `/routes`, and `/admin`.
+- The inbound listener serves an unauthenticated `/health`.
 
 Forwarding:
 
@@ -355,10 +383,11 @@ LiveView:
 - Add validations, identities, and AshCloak configuration.
 - Add basic auth plug and mount `/routes` LiveViews; protect `/admin`.
 - Add `/health` and the root redirect.
-- Configure `PORT` in `config/runtime.exs` with integer/range validation,
-  defaulting to `4000`, and keep the loopback bind.
-- Add Phase 1 tests and README env exports (including how to run on another
-  port).
+- Add the local endpoint and the `LocalProxyWeb.InboundEndpoint`, configured
+  with `OUTBOUND_PORT` (default 4000) and `INBOUND_PORT` (default 4001) in
+  `config/runtime.exs`, both binding loopback.
+- Add Phase 1 tests and README env exports (including how to run on other
+  ports).
 
 Done when: `mix test` passes and you can create, edit, pause, and delete a route
 in the browser, with header values encrypted in SQLite.
@@ -376,11 +405,13 @@ headers, and all outbound tests pass.
 ### Phase 3 — Inbound
 
 - Add `InboundAuth` and the inbound dispatcher with longest-prefix matching.
+- Add `LocalProxyWeb.InboundEndpoint` and `InboundRouter`; move the catch-all
+  there so the tunnel listener has no UI, admin, or outbound routes.
 - Add loopback target enforcement at save and request time.
 - Strip `X-Proxy-Key`, reuse the forwarder, add inbound tests.
-- Document the app-side tunnel requirement in README: public hostname forwards
-  to `http://127.0.0.1:<PORT>` (default 4000), and `X-Proxy-Key` is added to
-  inbound requests.
+- Document the app-side tunnel requirement in README: the tunnel points at
+  `http://127.0.0.1:<INBOUND_PORT>` (default 4001), `X-Proxy-Key` is added to
+  inbound requests, and users visit the UI on `OUTBOUND_PORT` (default 4000).
 
 Done when: a request through the tunnel with the correct key reaches a local
 service, and missing/wrong keys get 401 without touching a target.

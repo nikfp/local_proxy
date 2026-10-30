@@ -30,6 +30,11 @@ config :local_proxy, LocalProxyWeb.Endpoint,
     tailwind: {Tailwind, :install_and_run, [:local_proxy, ~w(--watch)]}
   ]
 
+config :local_proxy, LocalProxyWeb.InboundEndpoint,
+  http: [ip: {127, 0, 0, 1}],
+  debug_errors: true,
+  secret_key_base: "5IxqQbR/ZHsm4LORXWotdCTxNiwbho3Z1GmdxA1F/V+xm9S6m+94HNExk79dSo9f"
+
 # ## SSL Support
 #
 # In order to use HTTPS in development, a self-signed

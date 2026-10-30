@@ -18,9 +18,24 @@ import Config
 # script that automatically sets the env var above.
 if System.get_env("PHX_SERVER") do
   config :local_proxy, LocalProxyWeb.Endpoint, server: true
+  config :local_proxy, LocalProxyWeb.InboundEndpoint, server: true
 end
 
-port = LocalProxy.Config.parse_port!(System.get_env("PORT"))
+outbound_port =
+  LocalProxy.Config.parse_port!(
+    System.get_env("OUTBOUND_PORT"),
+    4000,
+    "OUTBOUND_PORT"
+  )
+
+inbound_port =
+  LocalProxy.Config.parse_port!(
+    System.get_env("INBOUND_PORT"),
+    4001,
+    "INBOUND_PORT"
+  )
+
+LocalProxy.Config.ensure_distinct_ports!(outbound_port, inbound_port)
 
 upstream_timeout_ms =
   LocalProxy.Config.parse_positive_integer!(
@@ -36,7 +51,9 @@ max_body_bytes =
     "MAX_BODY_BYTES"
   )
 
-config :local_proxy, LocalProxyWeb.Endpoint, http: [port: port]
+config :local_proxy, LocalProxyWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: outbound_port]
+
+config :local_proxy, LocalProxyWeb.InboundEndpoint, http: [ip: {127, 0, 0, 1}, port: inbound_port]
 
 config :local_proxy, :proxy,
   upstream_timeout_ms: upstream_timeout_ms,
@@ -108,11 +125,13 @@ if config_env() == :prod do
   config :local_proxy, LocalProxyWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
-      # The proxy has unauthenticated outbound routes, so it must only listen
-      # on loopback. Put a tunnel or reverse proxy in front for public access.
+      # The outbound listener also serves the UI and admin. It must only listen
+      # on loopback; the tunnel points at the separate inbound listener.
       ip: {127, 0, 0, 1}
     ],
     secret_key_base: secret_key_base
+
+  config :local_proxy, LocalProxyWeb.InboundEndpoint, secret_key_base: secret_key_base
 
   config :ash,
     keyset_signing_secret:

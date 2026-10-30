@@ -39,11 +39,15 @@ defmodule LocalProxyWeb.InboundTest do
     build_conn() |> put_req_header("x-proxy-key", @key)
   end
 
+  defp inbound_get(conn, path) do
+    dispatch(conn, LocalProxyWeb.InboundEndpoint, "GET", path)
+  end
+
   describe "authentication" do
     test "missing key returns 401 without a browser challenge", %{conn: conn} do
       create_route()
 
-      conn = get(conn, "/api/users")
+      conn = inbound_get(conn, "/api/users")
 
       assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
       assert get_resp_header(conn, "www-authenticate") == []
@@ -55,13 +59,13 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", "wrong")
-        |> get("/api/users")
+        |> inbound_get("/api/users")
 
       assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
 
     test "authentication runs before route lookup", %{conn: conn} do
-      conn = get(conn, "/does-not-match-a-route")
+      conn = inbound_get(conn, "/does-not-match-a-route")
 
       assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
@@ -72,7 +76,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api/users")
+        |> inbound_get("/api/users")
 
       assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
     end
@@ -83,7 +87,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api/users")
+        |> inbound_get("/api/users")
 
       assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
     end
@@ -94,7 +98,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/apix/users")
+        |> inbound_get("/apix/users")
 
       assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
     end
@@ -119,7 +123,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api/v1/things")
+        |> inbound_get("/api/v1/things")
 
       assert response(conn, 200) == "long"
     end
@@ -144,7 +148,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api/users/1?x=2")
+        |> inbound_get("/api/users/1?x=2")
 
       assert conn.status == 200
 
@@ -165,7 +169,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api")
+        |> inbound_get("/api")
 
       assert response(conn, 200) == "/"
     end
@@ -174,13 +178,44 @@ defmodule LocalProxyWeb.InboundTest do
       create_route()
 
       for method <- ["CONNECT", "TRACE"] do
-        conn = dispatch(inbound_conn(), @endpoint, method, "/api")
+        conn = dispatch(inbound_conn(), LocalProxyWeb.InboundEndpoint, method, "/api")
 
         assert json_response(conn, 405) == %{
                  "error" => "method_not_allowed",
                  "status" => 405
                }
       end
+    end
+  end
+
+  describe "listener segregation" do
+    test "the local listener does not serve the inbound catch-all", %{conn: conn} do
+      create_route()
+
+      conn = get(conn, "/api/users")
+      assert conn.status == 404
+    end
+
+    test "the inbound listener does not expose outbound routes or the UI", %{conn: _conn} do
+      Routing.create_route!(%{
+        name: "GitHub",
+        direction: :outbound,
+        slug: "github",
+        target_url: "https://api.example.com"
+      })
+
+      create_route()
+
+      for path <- ["/r/github", "/routes", "/admin"] do
+        conn = inbound_conn() |> inbound_get(path)
+        assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
+      end
+    end
+
+    test "the inbound listener health check is unauthenticated" do
+      conn = dispatch(build_conn(), LocalProxyWeb.InboundEndpoint, "GET", "/health")
+
+      assert response(conn, 200) == ~s({"status":"ok"})
     end
   end
 
@@ -196,7 +231,7 @@ defmodule LocalProxyWeb.InboundTest do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
-        |> get("/api/users")
+        |> inbound_get("/api/users")
 
       assert json_response(conn, 502) == %{
                "error" => "upstream_unreachable",

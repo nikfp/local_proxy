@@ -18,7 +18,8 @@ defmodule LocalProxy.Application do
       # Start a worker by calling: LocalProxy.Worker.start_link(arg)
       # {LocalProxy.Worker, arg},
       # Start to serve requests, typically the last entry
-      LocalProxyWeb.Endpoint
+      LocalProxyWeb.Endpoint,
+      LocalProxyWeb.InboundEndpoint
     ]
 
     # See https://elixir.hexdocs.pm/Supervisor.html

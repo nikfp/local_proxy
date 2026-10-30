@@ -63,7 +63,7 @@ config :local_proxy,
   ash_domains: [LocalProxy.Routing],
   generators: [timestamp_type: :utc_datetime]
 
-# Configure the endpoint
+# Configure the local endpoint (UI, admin, outbound proxy)
 config :local_proxy, LocalProxyWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
@@ -73,6 +73,16 @@ config :local_proxy, LocalProxyWeb.Endpoint,
   ],
   pubsub_server: LocalProxy.PubSub,
   live_view: [signing_salt: "+8FDANB2"]
+
+# Configure the tunnel-facing inbound endpoint. JSON errors only.
+config :local_proxy, LocalProxyWeb.InboundEndpoint,
+  url: [host: "localhost"],
+  adapter: Bandit.PhoenixAdapter,
+  render_errors: [
+    formats: [json: LocalProxyWeb.ErrorJSON],
+    layout: false
+  ],
+  pubsub_server: LocalProxy.PubSub
 
 # Configure LiveView
 config :phoenix_live_view,

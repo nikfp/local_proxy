@@ -3,9 +3,10 @@ defmodule LocalProxy.ConfigTest do
 
   alias LocalProxy.Config
 
-  describe "parse_port/1" do
-    test "defaults to 4000 when unset" do
+  describe "parse_port/2" do
+    test "defaults to 4000 for outbound and 4001 for inbound when unset" do
       assert Config.parse_port(nil) == {:ok, 4000}
+      assert Config.parse_port(nil, 4001) == {:ok, 4001}
     end
 
     test "accepts valid ports" do
@@ -22,9 +23,20 @@ defmodule LocalProxy.ConfigTest do
       assert {:error, _} = Config.parse_port("80.5")
     end
 
-    test "parse_port!/1 raises with the variable name" do
-      error = assert_raise RuntimeError, fn -> Config.parse_port!("nope") end
-      assert error.message =~ "PORT"
+    test "parse_port!/3 raises with the variable name" do
+      error =
+        assert_raise RuntimeError, fn ->
+          Config.parse_port!("nope", 4000, "OUTBOUND_PORT")
+        end
+
+      assert error.message =~ "OUTBOUND_PORT"
+    end
+
+    test "rejects identical listener ports" do
+      error = assert_raise RuntimeError, fn -> Config.ensure_distinct_ports!(4000, 4000) end
+      assert error.message =~ "must differ"
+
+      assert Config.ensure_distinct_ports!(4000, 4001) == :ok
     end
   end
 

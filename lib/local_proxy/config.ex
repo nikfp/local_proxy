@@ -9,30 +9,43 @@ defmodule LocalProxy.Config do
   @default_port 4000
 
   @doc """
-  Parses `PORT`, falling back to #{@default_port}.
+  Parses a port, falling back to `default`.
   """
-  def parse_port(nil), do: {:ok, @default_port}
+  def parse_port(value, default \\ @default_port)
 
-  def parse_port(value) when is_binary(value) do
+  def parse_port(nil, default), do: {:ok, default}
+
+  def parse_port(value, _default) when is_binary(value) do
     case Integer.parse(String.trim(value)) do
       {port, ""} when port in 1..65_535 -> {:ok, port}
       _ -> {:error, "expected an integer between 1 and 65535, got #{inspect(value)}"}
     end
   end
 
-  def parse_port(value) when is_integer(value) and value in 1..65_535, do: {:ok, value}
+  def parse_port(value, _default) when is_integer(value) and value in 1..65_535, do: {:ok, value}
 
-  def parse_port(value),
+  def parse_port(value, _default),
     do: {:error, "expected an integer between 1 and 65535, got #{inspect(value)}"}
 
   @doc """
-  Same as `parse_port/1`, but raises on invalid input.
+  Same as `parse_port/2`, but raises on invalid input with the variable name.
   """
-  def parse_port!(value) do
-    case parse_port(value) do
+  def parse_port!(value, default, name) do
+    case parse_port(value, default) do
       {:ok, port} -> port
-      {:error, message} -> raise "invalid PORT: #{message}"
+      {:error, message} -> raise "invalid #{name}: #{message}"
     end
+  end
+
+  @doc """
+  Ensures the two listeners do not try to bind the same port.
+  """
+  def ensure_distinct_ports!(outbound_port, inbound_port) do
+    if outbound_port == inbound_port do
+      raise "OUTBOUND_PORT and INBOUND_PORT must differ, both are #{outbound_port}"
+    end
+
+    :ok
   end
 
   @doc """

@@ -33,6 +33,11 @@ config :local_proxy, LocalProxyWeb.Endpoint,
   secret_key_base: "cZPCh2Bzc4rAQhxjdBxRM1i7sDwhi4ab4gd2PkipI+LFp4s+wH7xG2hRQ8Lpx4z8",
   server: false
 
+config :local_proxy, LocalProxyWeb.InboundEndpoint,
+  http: [ip: {127, 0, 0, 1}, port: 4003],
+  secret_key_base: "cZPCh2Bzc4rAQhxjdBxRM1i7sDwhi4ab4gd2PkipI+LFp4s+wH7xG2hRQ8Lpx4z8",
+  server: false
+
 # In test we don't send emails
 config :local_proxy, LocalProxy.Mailer, adapter: Swoosh.Adapters.Test
 
