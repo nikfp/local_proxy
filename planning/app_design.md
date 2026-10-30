@@ -46,9 +46,9 @@ two directions.
 ## Architecture
 
 ```
-Local app ──► 127.0.0.1:4000/r/:slug/...  ──► Proxy.forward ──► external URL
-Cloudflare ─► tunnel ─► 127.0.0.1:4000/*  ──► InboundAuth ─► Proxy.forward ─► localhost
-Browser ────► 127.0.0.1:4000/routes        ──► basic auth ─► RouteLive
+Local app ──► 127.0.0.1:<PORT>/r/:slug/... ──► Proxy.forward ──► external URL
+Cloudflare ─► tunnel ─► 127.0.0.1:<PORT>/* ──► InboundAuth ─► Proxy.forward ─► localhost
+Browser ────► 127.0.0.1:<PORT>/routes      ──► basic auth ─► RouteLive
 ```
 
 The forwarder is shared by both directions. Only route lookup, auth, and target
@@ -144,14 +144,20 @@ Required at boot in every environment except `test` (which uses fixed fixtures):
 
 Optional:
 
-- `PORT` — default `4000`.
+- `PORT` — listen port, default `4000`. Parsed as an integer, must be 1–65535;
+  an invalid value fails at boot with a clear message. Applies in dev and prod
+  via `config/runtime.exs`, so a local start can move off 4000 without editing
+  config. The bind address stays loopback. Anything pointing at the app
+  (browser, outbound callers, Cloudflare tunnel origin) must use the configured
+  port.
 - `UPSTREAM_TIMEOUT_MS` — default `30000`.
 - `MAX_BODY_BYTES` — default `10485760`.
 - `DATABASE_PATH`, `SECRET_KEY_BASE` — prod only, already used by
   `config/runtime.exs`.
 
-Binding is `{127, 0, 0, 1}` in dev and prod. Secrets are exported in the shell;
-README documents the exports. No `.env` loader and no generated defaults.
+Binding is `{127, 0, 0, 1}` in dev and prod; `PORT` changes the port only.
+Secrets are exported in the shell; README documents the exports. No `.env`
+loader and no generated defaults.
 
 `runtime.exs` stores validated values in application env, so request-time code
 does not re-read the environment.
@@ -309,6 +315,11 @@ Data and encryption:
 - Raw SQL shows the plaintext is not in `encrypted_headers`.
 - Defaults: enabled true, retries false.
 
+Configuration:
+
+- `PORT` defaults to 4000, accepts a valid integer, and rejects non-numeric or
+  out-of-range values at boot.
+
 Forwarding:
 
 - Path rewriting with and without a target base path; query preserved.
@@ -341,7 +352,10 @@ LiveView:
 - Add validations, identities, and AshCloak configuration.
 - Add basic auth plug and mount `/routes` LiveViews; protect `/admin`.
 - Add `/health` and the root redirect.
-- Add Phase 1 tests and README env exports.
+- Configure `PORT` in `config/runtime.exs` with integer/range validation,
+  defaulting to `4000`, and keep the loopback bind.
+- Add Phase 1 tests and README env exports (including how to run on another
+  port).
 
 Done when: `mix test` passes and you can create, edit, pause, and delete a route
 in the browser, with header values encrypted in SQLite.
@@ -362,7 +376,8 @@ headers, and all outbound tests pass.
 - Add loopback target enforcement at save and request time.
 - Strip `X-Proxy-Key`, reuse the forwarder, add inbound tests.
 - Document the app-side tunnel requirement in README: public hostname forwards
-  to `http://127.0.0.1:4000`, and `X-Proxy-Key` is added to inbound requests.
+  to `http://127.0.0.1:<PORT>` (default 4000), and `X-Proxy-Key` is added to
+  inbound requests.
 
 Done when: a request through the tunnel with the correct key reaches a local
 service, and missing/wrong keys get 401 without touching a target.

@@ -29,6 +29,8 @@ config :ash,
   infer_generic_action_reactors?: false,
   many_to_many_destroy_destination_on_match?: true
 
+config :ash_admin, :title, "Local Proxy Admin"
+
 config :spark,
   formatter: [
     remove_parens?: true,
@@ -58,6 +60,7 @@ config :spark,
 
 config :local_proxy,
   ecto_repos: [LocalProxy.Repo],
+  ash_domains: [LocalProxy.Routing],
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the endpoint

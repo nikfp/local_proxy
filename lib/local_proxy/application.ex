@@ -9,6 +9,7 @@ defmodule LocalProxy.Application do
   def start(_type, _args) do
     children = [
       LocalProxyWeb.Telemetry,
+      LocalProxy.Vault,
       LocalProxy.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:local_proxy, :ecto_repos), skip: skip_migrations?()},

@@ -35,35 +35,28 @@ defmodule LocalProxyWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
+    <header class="border-b border-base-300 bg-base-100/80 backdrop-blur">
+      <div class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+        <a href={~p"/routes"} class="flex items-center gap-3">
+          <span class="grid size-9 place-items-center rounded-lg bg-primary text-primary-content">
+            <.icon name="hero-arrows-right-left" class="size-5" />
+          </span>
+          <span>
+            <span class="block text-sm font-semibold leading-tight">Local Proxy</span>
+            <span class="block text-xs text-base-content/50">Header-injecting request forwarder</span>
+          </span>
         </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
+
+        <nav class="flex items-center gap-1">
+          <.link navigate={~p"/routes"} class="btn btn-ghost btn-sm">Routes</.link>
+          <a href="/admin" class="btn btn-ghost btn-sm">Admin</a>
+          <.theme_toggle />
+        </nav>
       </div>
     </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+    <main class="px-4 py-10 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-5xl space-y-6">
         {render_slot(@inner_block)}
       </div>
     </main>

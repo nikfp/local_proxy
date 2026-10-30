@@ -1,8 +1,18 @@
 defmodule LocalProxyWeb.Router do
   use LocalProxyWeb, :router
 
+  import Phoenix.Router
+
   pipeline :browser do
     plug :accepts, ["html"]
+
+    plug Plug.Parsers,
+      parsers: [:urlencoded, :multipart, :json],
+      pass: ["*/*"],
+      json_decoder: Phoenix.json_library()
+
+    plug Plug.MethodOverride
+    plug Plug.Head
     plug :fetch_session
     plug :fetch_live_flash
     plug :put_root_layout, html: {LocalProxyWeb.Layouts, :root}
@@ -10,8 +20,16 @@ defmodule LocalProxyWeb.Router do
     plug :put_secure_browser_headers
   end
 
+  pipeline :admin_auth do
+    plug LocalProxyWeb.Plugs.BasicAuth
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
+  end
+
+  scope "/" do
+    get "/health", LocalProxyWeb.HealthController, :show
   end
 
   scope "/", LocalProxyWeb do
@@ -20,18 +38,28 @@ defmodule LocalProxyWeb.Router do
     get "/", PageController, :home
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", LocalProxyWeb do
-  #   pipe_through :api
-  # end
+  scope "/", LocalProxyWeb do
+    pipe_through [:browser, :admin_auth]
+
+    live "/routes", RouteLive.Index, :index
+    live "/routes/new", RouteLive.Form, :new
+    live "/routes/:id/edit", RouteLive.Form, :edit
+  end
+
+  scope "/", LocalProxyWeb do
+    match :*, "/r/:slug", ProxyController, :outbound
+    match :*, "/r/:slug/*rest", ProxyController, :outbound
+  end
+
+  scope "/" do
+    pipe_through [:browser, :admin_auth]
+
+    import AshAdmin.Router
+    ash_admin "/admin"
+  end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:local_proxy, :dev_routes) do
-    # If you want to use the LiveDashboard in production, you should put
-    # it behind authentication and allow only admins to access it.
-    # If your application does not have an admins-only section yet,
-    # you can use Plug.BasicAuth to set up some basic authentication
-    # as long as you are also using SSL (which you should anyway).
     import Phoenix.LiveDashboard.Router
 
     scope "/dev" do
@@ -39,16 +67,6 @@ defmodule LocalProxyWeb.Router do
 
       live_dashboard "/dashboard", metrics: LocalProxyWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
-    end
-  end
-
-  if Application.compile_env(:local_proxy, :dev_routes) do
-    import AshAdmin.Router
-
-    scope "/admin" do
-      pipe_through :browser
-
-      ash_admin "/"
     end
   end
 end
