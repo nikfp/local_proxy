@@ -21,7 +21,9 @@ Route configuration lives at `/routes` and AshAdmin at `/admin`, both on
 ## Environment variables
 
 The app fails fast if a required value is missing or malformed. Export values in
-the shell; there is no `.env` loader.
+the shell; there is no `.env` loader. See `.env.example` for a local development
+template. Copy it to `.env` (gitignored) and source it, or export the values
+directly.
 
 ### Required in development and production
 
