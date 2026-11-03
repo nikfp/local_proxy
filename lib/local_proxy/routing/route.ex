@@ -18,8 +18,9 @@ defmodule LocalProxy.Routing.Route do
 
   cloak do
     vault(LocalProxy.Vault)
-    attributes([:headers])
+    attributes([:headers, :inbound_key])
     encrypt_nil?(false)
+    on_decrypt(&LocalProxy.Vault.Cipher.on_decrypt/4)
   end
 
   actions do
@@ -31,6 +32,7 @@ defmodule LocalProxy.Routing.Route do
       :path_prefix,
       :target_url,
       :headers,
+      :inbound_key,
       :enabled,
       :retries
     ]
@@ -48,6 +50,7 @@ defmodule LocalProxy.Routing.Route do
         :path_prefix,
         :target_url,
         :headers,
+        :inbound_key,
         :enabled,
         :retries
       ]
@@ -64,6 +67,7 @@ defmodule LocalProxy.Routing.Route do
         :path_prefix,
         :target_url,
         :headers,
+        :inbound_key,
         :enabled,
         :retries
       ]
@@ -78,6 +82,7 @@ defmodule LocalProxy.Routing.Route do
   validations do
     validate {LocalProxy.Routing.Validations.DirectionShape, []}
     validate {LocalProxy.Routing.Validations.TargetUrl, []}
+    validate {LocalProxy.Routing.Validations.InboundKey, []}
   end
 
   attributes do
@@ -116,6 +121,10 @@ defmodule LocalProxy.Routing.Route do
     attribute :headers, :map do
       allow_nil? false
       default %{}
+    end
+
+    attribute :inbound_key, :string do
+      constraints min_length: 32, max_length: 256
     end
 
     attribute :enabled, :boolean do

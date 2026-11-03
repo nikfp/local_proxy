@@ -13,6 +13,8 @@ defmodule LocalProxyWeb.ProxyController do
   alias LocalProxy.Routing
   alias LocalProxy.Routing.Loopback
   alias LocalProxy.Routing.Route
+  alias LocalProxy.Vault.DecryptError
+  alias LocalProxy.Vault.LockedError
 
   @disallowed_methods ~w(CONNECT TRACE)
   @allowed_methods "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
@@ -37,16 +39,16 @@ defmodule LocalProxyWeb.ProxyController do
     if disallowed_method?(conn) do
       method_not_allowed(conn)
     else
-      case Routing.get_inbound_route(path) do
-        nil ->
-          error(conn, 404, "no_route")
-
+      case conn.assigns[:inbound_route] do
         %Route{} = route ->
           if loopback_target?(route) do
             forward_request(conn, route, strip_prefix(path, route.path_prefix))
           else
             error(conn, 502, "upstream_unreachable", route)
           end
+
+        _ ->
+          error(conn, 401, "unauthorized")
       end
     end
   end
@@ -86,7 +88,7 @@ defmodule LocalProxyWeb.ProxyController do
         }
 
         conn
-        |> respond(route, Proxy.forward(route, request))
+        |> respond(route, forward(route, request))
 
       {:error, :too_large, conn} ->
         error(conn, 413, "request_too_large", route)
@@ -94,6 +96,13 @@ defmodule LocalProxyWeb.ProxyController do
       {:error, :read_error, conn} ->
         error(conn, 500, "proxy_error", route)
     end
+  end
+
+  defp forward(route, request) do
+    Proxy.forward(route, request)
+  rescue
+    LockedError -> {:error, :vault_locked, 0}
+    DecryptError -> {:error, :proxy_error, 0}
   end
 
   defp read_request_body(conn) do
@@ -141,6 +150,7 @@ defmodule LocalProxyWeb.ProxyController do
   defp respond(conn, route, {:error, reason, _duration_ms}) do
     {status, error} =
       case reason do
+        :vault_locked -> {503, "vault_locked"}
         :upstream_timeout -> {504, "upstream_timeout"}
         :upstream_unreachable -> {502, "upstream_unreachable"}
         :upstream_response_too_large -> {502, "upstream_response_too_large"}

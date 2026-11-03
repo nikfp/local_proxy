@@ -1,28 +1,20 @@
 defmodule LocalProxy.Vault do
   @moduledoc """
-  Cloak vault used by `LocalProxy.Routing.Route` to encrypt header values.
+  Cloak vault used by `LocalProxy.Routing.Route`.
 
-  The key is decoded and validated in `config/runtime.exs` and stored in the
-  application environment, so a missing or malformed `CLOAK_KEY` fails at boot.
+  The cipher configuration is static and keyless. The data key is read from
+  `LocalProxy.Vault.KeyRing` at call time, so the vault does not need a key to
+  start and can be locked or unlocked without a restart.
   """
 
   use Cloak.Vault, otp_app: :local_proxy
 
   @impl GenServer
   def init(config) do
-    key =
-      :local_proxy
-      |> Application.get_env(__MODULE__, [])
-      |> Keyword.fetch!(:key)
+    ciphers = [
+      default: {LocalProxy.Vault.Cipher, tag: "AES.GCM.V1", iv_length: 12}
+    ]
 
-    config =
-      Keyword.put(config, :ciphers,
-        default: {
-          Cloak.Ciphers.AES.GCM,
-          tag: "AES.GCM.V1", key: key, iv_length: 12
-        }
-      )
-
-    {:ok, config}
+    {:ok, Keyword.put(config, :ciphers, ciphers)}
   end
 end

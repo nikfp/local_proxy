@@ -16,7 +16,8 @@ defmodule LocalProxy.Routing.RouteTest do
     name: "Local API",
     direction: :inbound,
     path_prefix: "/api",
-    target_url: "http://localhost:3000"
+    target_url: "http://localhost:3000",
+    inbound_key: "test-inbound-key-0123456789abcdef"
   }
 
   defp create(attrs) do
@@ -47,6 +48,21 @@ defmodule LocalProxy.Routing.RouteTest do
 
     test "inbound rejects a slug" do
       assert error_text(create_inbound(%{slug: "nope"})) =~ "must be empty for inbound routes"
+    end
+
+    test "enabled inbound routes require an inbound key" do
+      assert error_text(create_inbound(%{inbound_key: nil})) =~
+               "is required for enabled inbound routes"
+    end
+
+    test "outbound routes must not set an inbound key" do
+      assert error_text(create_outbound(%{inbound_key: String.duplicate("k", 32)})) =~
+               "must be empty for outbound routes"
+    end
+
+    test "inbound keys must be at least 32 characters" do
+      assert error_text(create_inbound(%{inbound_key: "short"})) =~
+               "must be at least 32 characters"
     end
   end
 
@@ -181,6 +197,24 @@ defmodule LocalProxy.Routing.RouteTest do
 
       reloaded = Routing.get_route!(route.id, load: [:headers])
       assert reloaded.headers["x-secret"] == secret
+    end
+
+    test "inbound keys round-trip and are not stored in plaintext" do
+      key = "route-key-#{System.unique_integer([:positive])}-0123456789abcdef0123456789abcdef"
+      route = create_inbound(%{inbound_key: key})
+
+      reloaded = Routing.get_route!(route.id, load: [:inbound_key])
+      assert reloaded.inbound_key == key
+
+      %{rows: rows} =
+        Repo.query!("select encrypted_inbound_key from routes where path_prefix = ?", [
+          route.path_prefix
+        ])
+
+      assert [%{encrypted_inbound_key: ciphertext}] =
+               Enum.map(rows, fn [value] -> %{encrypted_inbound_key: value} end)
+
+      refute ciphertext =~ key
     end
   end
 

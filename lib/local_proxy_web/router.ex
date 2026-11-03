@@ -25,6 +25,10 @@ defmodule LocalProxyWeb.Router do
     plug LocalProxyWeb.Plugs.RequireAuth
   end
 
+  pipeline :vault_gate do
+    plug LocalProxyWeb.Plugs.VaultGate
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
   end
@@ -51,6 +55,8 @@ defmodule LocalProxyWeb.Router do
   end
 
   scope "/", LocalProxyWeb do
+    pipe_through :vault_gate
+
     match :*, "/r/:slug", ProxyController, :outbound
     match :*, "/r/:slug/*rest", ProxyController, :outbound
   end

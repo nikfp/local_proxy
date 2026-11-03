@@ -41,21 +41,8 @@ defmodule LocalProxy.ConfigTest do
   end
 
   describe "decode_cloak_key/1" do
-    test "decodes a 32-byte base64 key" do
-      encoded = Base.encode64(:binary.copy(<<1>>, 32))
-      assert {:ok, key} = Config.decode_cloak_key(encoded)
-      assert byte_size(key) == 32
-    end
-
-    test "rejects missing, invalid, and wrong-length keys" do
-      assert {:error, message} = Config.decode_cloak_key(nil)
-      assert message =~ "missing"
-
-      assert {:error, message} = Config.decode_cloak_key("not base64!")
-      assert message =~ "base64"
-
-      assert {:error, message} = Config.decode_cloak_key(Base.encode64("short"))
-      assert message =~ "32 bytes"
+    test "is no longer part of the configuration surface" do
+      refute function_exported?(Config, :decode_cloak_key, 1)
     end
   end
 

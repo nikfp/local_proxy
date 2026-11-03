@@ -4,6 +4,7 @@ defmodule LocalProxyWeb.RouteLive.Form do
   use LocalProxyWeb, :live_view
 
   alias LocalProxy.Routing
+  alias LocalProxy.Routing.InboundKey
   alias LocalProxy.Routing.Route
 
   @impl true
@@ -14,6 +15,7 @@ defmodule LocalProxyWeb.RouteLive.Form do
           socket
           |> assign(:page_title, "New route")
           |> assign(:header_rows, [new_header_row()])
+          |> assign(:inbound_key_revealed, true)
           |> assign_form(new_form())
 
         :edit ->
@@ -29,6 +31,7 @@ defmodule LocalProxyWeb.RouteLive.Form do
               |> assign(:page_title, "Edit #{route.name}")
               |> assign(:route, route)
               |> assign(:header_rows, rows_from_headers(route.headers))
+              |> assign(:inbound_key_revealed, false)
               |> assign_form(edit_form(route))
           end
       end
@@ -48,19 +51,45 @@ defmodule LocalProxyWeb.RouteLive.Form do
       |> clear_unused_path()
       |> Map.put("headers", headers_from_rows(socket.assigns.header_rows))
 
-    case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
-      {:ok, route} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Route #{route.name} saved.")
-         |> push_navigate(to: ~p"/routes")}
+    try do
+      case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
+        {:ok, route} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Route #{route.name} saved.")
+           |> push_navigate(to: ~p"/routes")}
 
-      {:error, form} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "Please fix the highlighted fields.")
-         |> assign(:form, form)}
+        {:error, form} ->
+          {:noreply,
+           socket
+           |> put_flash(:error, "Please fix the highlighted fields.")
+           |> assign(:form, form)}
+      end
+    rescue
+      LocalProxy.Vault.LockedError ->
+        {:noreply, put_flash(socket, :error, "The vault is locked. Sign in again.")}
+
+      LocalProxy.Vault.DecryptError ->
+        {:noreply, put_flash(socket, :error, "The vault could not decrypt the saved values.")}
     end
+  end
+
+  def handle_event("generate_inbound_key", _params, socket) do
+    form =
+      AshPhoenix.Form.validate(
+        socket.assigns.form,
+        %{"route" => %{"inbound_key" => InboundKey.generate()}}
+      )
+
+    {:noreply, assign(socket, form: form, inbound_key_revealed: true)}
+  end
+
+  def handle_event("reveal_inbound_key", _params, socket) do
+    {:noreply, assign(socket, :inbound_key_revealed, true)}
+  end
+
+  def handle_event("hide_inbound_key", _params, socket) do
+    {:noreply, assign(socket, :inbound_key_revealed, false)}
   end
 
   def handle_event("add_header", _params, socket) do
@@ -120,16 +149,23 @@ defmodule LocalProxyWeb.RouteLive.Form do
   defp load_route(id) do
     case Routing.get_route(id) do
       nil -> nil
-      {:ok, route} -> Ash.load!(route, :headers, domain: Routing)
-      route -> Ash.load!(route, :headers, domain: Routing)
+      {:ok, route} -> Ash.load!(route, [:headers, :inbound_key], domain: Routing)
+      route -> Ash.load!(route, [:headers, :inbound_key], domain: Routing)
     end
   end
 
   defp clear_unused_path(params) do
     case params["direction"] do
-      "outbound" -> Map.put(params, "path_prefix", nil)
-      "inbound" -> Map.put(params, "slug", nil)
-      _ -> params
+      "outbound" ->
+        params
+        |> Map.put("path_prefix", nil)
+        |> Map.put("inbound_key", nil)
+
+      "inbound" ->
+        Map.put(params, "slug", nil)
+
+      _ ->
+        params
     end
   end
 
@@ -192,6 +228,20 @@ defmodule LocalProxyWeb.RouteLive.Form do
     end
   end
 
+  defp inbound_key_present?(%Phoenix.HTML.Form{} = form) do
+    case form[:inbound_key] do
+      %Phoenix.HTML.FormField{value: value} -> is_binary(value) and value != ""
+      _ -> false
+    end
+  end
+
+  defp inbound_key_changed?(%Phoenix.HTML.Form{} = form, %Route{} = route) do
+    case form[:inbound_key] do
+      %Phoenix.HTML.FormField{value: value} -> value != route.inbound_key
+      _ -> false
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -246,10 +296,9 @@ defmodule LocalProxyWeb.RouteLive.Form do
             <p>Local server gets: <span class="text-primary">GET /</span></p>
           </div>
           <p class="text-base-content/70">
-            Inbound targets must be loopback addresses. Callers must send the shared
-            <code class="font-mono">X-Proxy-Key</code>
-            header. Paths outside the
-            configured prefix return 404.
+            Inbound targets must be loopback addresses. Callers must send this
+            route's <code class="font-mono">X-Proxy-Key</code>
+            value. Unknown paths and wrong keys return 401.
           </p>
         </div>
       </div>
@@ -298,6 +347,63 @@ defmodule LocalProxyWeb.RouteLive.Form do
             before forwarding. <code class="font-mono">/</code>
             is not allowed because it would capture every tunnel request and leave
             no unmatched path.
+          </p>
+        </div>
+
+        <div :if={direction(@form) == "inbound"} class="grid gap-2">
+          <div class="flex items-end gap-2">
+            <div class="flex-1">
+              <.input
+                :if={@live_action == :new or @inbound_key_revealed or not inbound_key_present?(@form)}
+                field={@form[:inbound_key]}
+                label="Inbound key"
+                placeholder="Generate or paste the key the caller sends"
+                autocomplete="off"
+              />
+              <div
+                :if={
+                  @live_action == :edit and not @inbound_key_revealed and
+                    inbound_key_present?(@form)
+                }
+                class="grid gap-1"
+              >
+                <span class="text-xs font-medium text-base-content/60">Inbound key</span>
+                <span class="flex h-10 items-center gap-1 rounded-md border border-base-300 bg-base-200 px-3 font-mono text-xs tracking-widest text-base-content/50">
+                  ••••••••••••
+                  <.button
+                    type="button"
+                    class="btn btn-xs btn-ghost ml-auto"
+                    phx-click="reveal_inbound_key"
+                    aria-label="Reveal inbound key"
+                  >
+                    <.icon name="hero-eye" class="size-4" />
+                  </.button>
+                </span>
+              </div>
+            </div>
+            <.button
+              type="button"
+              phx-click="generate_inbound_key"
+              class="btn btn-sm btn-ghost"
+            >
+              <.icon name="hero-key" class="size-4" /> Generate
+            </.button>
+            <.button
+              :if={
+                @live_action == :edit and @inbound_key_revealed and inbound_key_present?(@form) and
+                  not inbound_key_changed?(@form, @route)
+              }
+              type="button"
+              phx-click="hide_inbound_key"
+              class="btn btn-sm btn-ghost"
+              aria-label="Hide inbound key"
+            >
+              <.icon name="hero-eye-slash" class="size-4" />
+            </.button>
+          </div>
+          <p class="-mt-1 text-xs text-base-content/60">
+            The caller sends this exact value in <code class="font-mono">X-Proxy-Key</code>.
+            Rotating it replaces the old key immediately, so update the caller first.
           </p>
         </div>
 

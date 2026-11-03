@@ -5,7 +5,7 @@ defmodule LocalProxyWeb.InboundTest do
   alias LocalProxy.Routing
 
   @stub LocalProxy.InboundTestStub
-  @key "test-inbound-key"
+  @key "test-inbound-key-0123456789abcdef"
 
   defp create_route(attrs \\ %{}) do
     Routing.create_route!(
@@ -15,7 +15,8 @@ defmodule LocalProxyWeb.InboundTest do
           direction: :inbound,
           path_prefix: "/api",
           target_url: "http://127.0.0.1:4567",
-          headers: %{}
+          headers: %{},
+          inbound_key: @key
         },
         attrs
       )
@@ -64,6 +65,30 @@ defmodule LocalProxyWeb.InboundTest do
       assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
 
+    test "another route's key returns 401", %{conn: conn} do
+      create_route(%{inbound_key: "another-route-key-0123456789abcdef"})
+
+      conn =
+        conn
+        |> put_req_header("x-proxy-key", @key)
+        |> inbound_get("/api/users")
+
+      assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
+    end
+
+    test "a locked vault returns 503 before route lookup", %{conn: conn} do
+      create_route()
+      LocalProxy.VaultTestHelpers.lock()
+      on_exit(&LocalProxy.VaultTestHelpers.unlock/0)
+
+      conn =
+        conn
+        |> put_req_header("x-proxy-key", @key)
+        |> inbound_get("/api/users")
+
+      assert json_response(conn, 503) == %{"error" => "vault_locked", "status" => 503}
+    end
+
     test "authentication runs before route lookup", %{conn: conn} do
       conn = inbound_get(conn, "/does-not-match-a-route")
 
@@ -72,13 +97,13 @@ defmodule LocalProxyWeb.InboundTest do
   end
 
   describe "route matching" do
-    test "no matching prefix returns 404", %{conn: conn} do
+    test "no matching prefix returns 401", %{conn: conn} do
       conn =
         conn
         |> put_req_header("x-proxy-key", @key)
         |> inbound_get("/api/users")
 
-      assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
+      assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
 
     test "disabled routes are ignored", %{conn: conn} do
@@ -89,7 +114,7 @@ defmodule LocalProxyWeb.InboundTest do
         |> put_req_header("x-proxy-key", @key)
         |> inbound_get("/api/users")
 
-      assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
+      assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
 
     test "prefix matching is segment-aware", %{conn: conn} do
@@ -100,7 +125,7 @@ defmodule LocalProxyWeb.InboundTest do
         |> put_req_header("x-proxy-key", @key)
         |> inbound_get("/apix/users")
 
-      assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
+      assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
     end
 
     test "the longest prefix wins", %{conn: conn} do
@@ -208,14 +233,14 @@ defmodule LocalProxyWeb.InboundTest do
 
       for path <- ["/r/github", "/routes", "/admin"] do
         conn = inbound_conn() |> inbound_get(path)
-        assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
+        assert json_response(conn, 401) == %{"error" => "unauthorized", "status" => 401}
       end
     end
 
     test "the inbound listener health check is unauthenticated" do
       conn = dispatch(build_conn(), LocalProxyWeb.InboundEndpoint, "GET", "/health")
 
-      assert response(conn, 200) == ~s({"status":"ok"})
+      assert json_response(conn, 200)["status"] == "ok"
     end
   end
 

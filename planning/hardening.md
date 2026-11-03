@@ -2,21 +2,26 @@
 
 This document extends `planning/app_design.md`. It replaces the boot-time
 `CLOAK_KEY` requirement with a vault that stays locked until a human signs in,
-and removes the plaintext admin password from the environment.
+removes the plaintext admin password and inbound key from the environment, and
+generates `SECRET_KEY_BASE` per BEAM start.
 
 ## Motivation
 
 The proxy exists so development apps and LLM agents can call external services
 without those services' API keys ever entering an LLM context. Today the route
-headers are encrypted at rest, but the encryption key (`CLOAK_KEY`) and the
-admin password (`ADMIN_PASSWORD`) are environment variables. An agent running
-as the same macOS user can read both, then either decrypt the SQLite file or
+headers are encrypted at rest, but the encryption key (`CLOAK_KEY`), admin
+password (`ADMIN_PASSWORD`), inbound key (`INBOUND_PROXY_KEY`), and cookie
+signing secret (`SECRET_KEY_BASE`) are environment variables. An agent running
+as the same macOS user can read them, then either decrypt the SQLite file or
 sign into the UI and use the reveal button / AshAdmin.
 
 The goal is narrow and deliberate: an agent that can read files and run shell
 commands as the user must not be able to recover injected header values. It is
-not a defence against a determined attacker with the user's password, nor does
-it stop an agent from *using* the proxy while it is unlocked.
+not a defence against a determined attacker with the user's password, and it
+does not stop an agent from *using* the proxy while it is unlocked. The proxy
+also cannot prevent an upstream that reflects request headers from returning
+them to the caller; that is out of scope and depends on route targets not
+behaving that way.
 
 ## Core principle
 
@@ -28,7 +33,8 @@ gesture already in the design: signing in.
 ## Design summary
 
 - The vault starts with no key. No key material is read at boot.
-- A random 32-byte data key `K` encrypts route headers.
+- A random 32-byte data key `K` encrypts route headers and per-route inbound
+  keys.
 - `K` is stored wrapped (AES-256-GCM) under a key derived from the admin
   password with a slow KDF. Only the wrapped form is persisted, in `vault_keys`.
 - Login derives the KEK, unwraps `K`, and installs it in an in-memory keyring.
@@ -37,29 +43,41 @@ gesture already in the design: signing in.
   at call time. It does not require restarting the vault.
 - While locked, proxy traffic returns `503 vault_locked`. `/health` and
   `/login` still work.
+- Each inbound route has its own key, stored encrypted under `K`. The caller
+  supplies it in `X-Proxy-Key`.
+- `SECRET_KEY_BASE` is generated per BEAM start. There is no environment secret
+  to read.
 - Locking is implicit on app start and explicit on sign-out. The key never
   touches disk in usable form.
 
-This keeps `app_design.md`'s promise that changing the key makes old headers
-unreadable, but the key is now recoverable from the password rather than from
-the environment.
+This replaces the old `CLOAK_KEY` promise. The key is now recoverable from the
+password rather than from the environment, and changing the password only
+rewraps `K`. Old database copies remain readable with the old password.
 
 ## Threat model
 
 Protected against:
 
 - Reading the SQLite database, backups, or a synced project directory.
-- Reading the shell environment, `.zshrc`, or process environment.
+- Reading the shell environment, `.zshrc`, or process environment. The vault
+  key, admin password, inbound keys, and `SECRET_KEY_BASE` are not there.
 - Reading any key file on disk — there isn't one.
-- Forging a session using a leaked `SECRET_KEY_BASE` (see session binding).
+- Forging a session using a leaked `SECRET_KEY_BASE`; it is generated per BEAM
+  start and never stored.
 - A stale browser session surviving an app restart.
+- Remote or tunnel-based unlock. Login exists only on the loopback listener.
 
 Not protected against:
 
 - An agent using the proxy through `/r/...` while the vault is unlocked. That
   is the intended feature; decryption isolation does not prevent use.
+- An upstream that reflects injected headers or redirects them onward. If an
+  agent can make such a request while unlocked, the values can return in the
+  response. This is out of scope and depends on route targets.
 - An agent that observes the password (keylogger, shoulder surfing, shared
   clipboard).
+- An agent that can read the caller's configuration, for example Smartsuite's
+  copy of an inbound key. The vault protects only the local copy.
 - An agent that deletes or corrupts `vault_keys` or the database. That is a
   denial of service, not a leak.
 - An agent that can modify application code or the running BEAM.
@@ -93,16 +111,23 @@ Envelope layout (versioned, self-describing):
 - KEK — `:crypto.pbkdf2_hmac(:sha256, password, salt, iterations, 32)`.
   Baseline 600,000 iterations. Argon2id is preferable if a raw-digest API is
   available; if added, encode it as version 2 and keep PBKDF2 for reading.
+- Accepted `iterations` range is 100,000 to 2,000,000. Reject anything outside
+  that range before running the KDF, so a tampered row cannot hang login.
+- Password length is 12 to 1,024 bytes.
 - Wrap — AES-256-GCM with the random IV, AAD `"local_proxy:vault_key:v1"`.
 - Store the salt, iterations, IV, and tag inside the envelope. Never store the
   KEK or any password hash.
 - A wrong password fails GCM tag verification. Compare in constant time by
   relying on the AEAD tag; do not add a separate `==` check.
-- The admin username remains `ADMIN_USER` in the environment. It is not secret.
+- The admin username is `ADMIN_USER`, optional and defaulting to `admin`. It is
+  not secret.
 
-The DB, not a file, is deliberate: a DB backup then contains everything needed
-to restore, given the password. Losing the password means existing headers are
-unrecoverable, identical to losing `CLOAK_KEY` today.
+There is no backup or restore feature in this design. If an operator makes a
+copy of the database, that copy contains the wrapped key and every ciphertext,
+and the password that was current when the copy was made can open it. Changing
+the password later does not invalidate old copies. Losing the password means
+existing headers are unrecoverable; recovery is to delete the database and
+re-enter the routes.
 
 ## Keyring
 
@@ -120,6 +145,11 @@ end
 
 def lock do
   :persistent_term.erase(@pt_key)
+
+  if Process.whereis(LocalProxy.PubSub) do
+    Phoenix.PubSub.broadcast(LocalProxy.PubSub, "vault", :vault_locked)
+  end
+
   :ok
 end
 
@@ -143,9 +173,14 @@ def locked?, do: key() == :locked
 - The key is in VM memory only. It is process-wide, so every authenticated
   session shares the unlocked vault. That is acceptable for a single-user tool
   and is bounded by the login check below.
+- `KeyRing.lock/0` erases the term and broadcasts `:vault_locked` on
+  `LocalProxy.PubSub` so LiveViews can redirect or disconnect. It must tolerate
+  PubSub not being started in a mix task.
 - `:persistent_term` is chosen for read performance; a GenServer or ETS would
   also work. None of them are a boundary against code running inside the VM.
 - Do not log the key, the KEK, the password, or the envelope.
+- Disable or redirect BEAM crash dumps (`ERL_CRASH_DUMP_SECONDS=0`) so the
+  in-memory key cannot be written to `erl_crash.dump`.
 
 ## Wrapper cipher
 
@@ -174,9 +209,19 @@ defmodule LocalProxy.Vault.Cipher do
   @impl true
   def decrypt(ciphertext, opts) do
     case KeyRing.key() do
-      {:ok, key} -> GCM.decrypt(ciphertext, Keyword.put(opts, :key, key))
-      :locked -> :error
+      {:ok, key} ->
+        case GCM.decrypt(ciphertext, Keyword.put(opts, :key, key)) do
+          {:ok, plaintext} when is_binary(plaintext) -> {:ok, plaintext}
+          _ -> {:error, LocalProxy.Vault.DecryptError.exception([])}
+        end
+
+      :locked ->
+        {:error, LocalProxy.Vault.LockedError.exception([])}
     end
+  end
+
+  def on_decrypt(_resource, _records, _field, _context) do
+    if KeyRing.locked?(), do: {:error, LocalProxy.Vault.LockedError.exception([])}, else: :ok
   end
 end
 ```
@@ -198,28 +243,40 @@ Important compatibility points:
 - `Cloak.Ciphers.AES.GCM.can_decrypt?/2` only inspects the tag header and does
   not use the key, so the wrapper can delegate while locked. This lets Cloak
   pick the cipher without exposing key material.
-- `LockedError` is a small exception module. Cloak's `encrypt!/1` expects an
-  exception tuple, so return `{:error, LockedError.exception([])}` rather than
-  bare `:error` from `encrypt/2`.
-- `decrypt/2` returning `:error` is valid for the cipher but propagates as
-  `:error` from `Cloak.Vault.decrypt/1`; every caller must gate on
-  `KeyRing.locked?/0` before touching headers.
+- `LockedError` is a small exception module implementing `Plug.Exception` with
+  status 503. Cloak's `encrypt!/1` and `decrypt!/1` expect an exception tuple,
+  so both callbacks return `{:error, LockedError.exception([])}` when locked.
+- Never return bare `:error` from `decrypt/2`. `Cloak.Vault.decrypt!/1` only
+  matches `{:ok, _}` and `{:error, _}`; a bare `:error` would raise
+  `CaseClauseError`. Cloak's GCM cipher returns `{:ok, :error}` when the tag
+  does not authenticate, so normalize any non-binary plaintext to
+  `LocalProxy.Vault.DecryptError`.
+- AshCloak calls `vault.decrypt!/1`, so `Route` sets `on_decrypt` to
+  `LocalProxy.Vault.Cipher.on_decrypt/4`. That returns `{:error, LockedError}`
+  before AshCloak reaches `decrypt!` while locked.
+- A lock can still arrive between the pre-check and `decrypt!`. Proxy
+  controllers and LiveView event handlers rescue `LockedError` and return 503 or
+  redirect.
 
 ## Login and unlock flow
 
 1. `GET /login` renders the form. If `vault_keys` has no row, render a setup
    notice instead: run `mix local_proxy.set_password`. Do not allow first-run
    setup over HTTP; an agent could claim the password before the human does.
-2. `POST /login` checks the username against `ADMIN_USER` with
-   `Plug.Crypto.secure_compare/2`.
-3. Load the singleton `vault_keys` row, derive the KEK, and attempt to unwrap
-   `K`. This happens on *every* successful login, even if the vault is already
-   unlocked. It is the password check.
-4. On unwrap success, call `KeyRing.unlock(K)`, which returns a random
+2. Apply the login rate limit: five failed attempts per minute per source, then
+   429 with `Retry-After`. Reset the counter on success. The limiter is
+   in-memory per BEAM; a restart clears it.
+3. `POST /login` checks the username against `ADMIN_USER` (default `admin`) with
+   the existing length guard and `Plug.Crypto.secure_compare/2`.
+4. Load the singleton `vault_keys` row, validate the envelope and iteration
+   range, derive the KEK, and attempt to unwrap `K`. This happens on *every*
+   successful login, even if the vault is already unlocked. It is the password
+   check.
+5. On unwrap success, call `KeyRing.unlock(K)`, which returns a random
    `generation`.
-5. Renew the session, store `:admin_authenticated` and
+6. Renew the session, store `:admin_authenticated` and
    `:unlock_generation`, then redirect.
-6. On unwrap failure, return 401 with the generic invalid-credentials message.
+7. On unwrap failure, return 401 with the generic invalid-credentials message.
    Do not distinguish unknown user from bad password.
 
 Verifying the unwrap on every login matters. It means a tampered admin hash or
@@ -228,79 +285,91 @@ password that produces a session is the one that wrapped the stored key.
 
 ### Session binding
 
-Sessions are signed with `SECRET_KEY_BASE`, which may itself be readable from
-the environment. Bind each session to the unlock generation:
+Sessions are signed with `SECRET_KEY_BASE`, which is generated per BEAM start
+and is not in the environment. Bind each session to the unlock generation:
 
 - `RequireAuth` requires `:admin_authenticated` **and** that
   `get_session(:unlock_generation)` equals `KeyRing.generation/0`.
 - If the vault is locked or the generation differs, drop the session, set a
   flash, and redirect to `/login`.
+- `SessionController.new/2` must also check the generation, otherwise a stale
+  session can loop between `/login` and `/routes`.
 - LiveView mounts must apply the same check. A socket that outlives a lock
-  should be disconnected or redirected. Broadcast a `:vault_locked` event on
-  `LocalProxy.PubSub` from `KeyRing.lock/0` and handle it in LiveViews.
+  should be disconnected or redirected. `KeyRing.lock/0` broadcasts
+  `:vault_locked` on `LocalProxy.PubSub`; LiveViews handle it and disconnect.
+- Set the session cookie `max_age` to 12 hours.
+- Every successful login creates a new generation, so a second browser
+  invalidates the first session. Logout locks the vault for everyone.
 - This also invalidates sessions after an app restart, which is correct: the
-  vault is locked even though the cookie is still cryptographically valid.
+  cookie is no longer verifiable and the vault is locked.
 
 ### Sign-out and idle lock
 
 - `POST /logout` drops the session **and** calls `KeyRing.lock/0`. Signing out
-  therefore stops the proxy until the next sign-in. This is the secure default.
+  therefore stops the proxy until the next sign-in. This is the chosen secure
+  default.
 - A separate "Lock now" button is optional sugar for the same action.
-- Optional: an idle timeout (`UNLOCK_TTL_MINUTES`, default off) that calls
-  `KeyRing.lock/0` after N minutes without an authenticated request. Out of
-  scope for the first cut.
+- Idle lock is not implemented in this cut. The vault stays unlocked until
+  sign-out or restart.
 
 ## Locked behaviour
 
 - Outbound `match /r/...` and the inbound catch-all return
-  `503 {"error":"vault_locked","status":503}` before route lookup. Route
-  selection itself is cheap, but gating first avoids touching encrypted
-  columns and makes the state obvious.
+  `503 {"error":"vault_locked","status":503}` before route lookup. A
+  `VaultGate` plug runs first. Inbound does not look up routes or keys while
+  locked.
 - `/health` stays unauthenticated and `200`. Add `"vault":"locked"` or
   `"vault":"unlocked"` to the payload so scripts can wait for unlock.
 - `/login`, `/routes`, and `/admin` require a session as today. While locked,
   there is no valid session because `RequireAuth` also checks the generation.
 - The inbound listener serves the same 503. Consequence: after every BEAM
-  start, the Cloudflare tunnel returns 503 until a human signs in. This is
-  accepted. It is the cost of never reading a key at boot.
-- Optional refinement: allow routes with empty headers to forward while
-  locked. Not worth the extra branching for the first cut.
+  start, the Cloudflare tunnel returns 503 until a human signs in locally. This
+  is accepted and is the cost of never reading a key at boot.
+- While locked, UI reads return an Ash error rather than a crash because
+  `on_decrypt` returns `LockedError`. Writes and any lock that races a request
+  are rescued at the controller or LiveView boundary.
+- Do not allow routes with empty headers to forward while locked. The exception
+  adds branching and weakens the single locked state.
 
-## First run, rotation, migration
+## First run, rotation, reset
 
-Add a small set of mix tasks. All password prompts disable terminal echo
-(`stty -echo`) and never accept the password as a CLI argument or env var.
+Add one mix task. In a terminal it uses a hidden password prompt; when stdin is
+not a terminal it falls back to a plain line read so scripted setup still works.
+It never accepts the password as a CLI argument or env var. The task starts only
+the Repo, not the web endpoints, so it can run with the app stopped.
 
 - `mix local_proxy.set_password`
   - If no `vault_keys` row: generate `K`, prompt for a new password twice,
-    write the envelope.
+    validate 12–1,024 bytes, and write the envelope.
   - If a row exists: prompt for the current password, unwrap `K`, prompt for a
-    new password, rewrap and update in one transaction.
-  - Enforce a minimum length (12+ characters). The KDF is the only defence if
-    the DB leaks, so weak passwords are the weak point.
-- `mix local_proxy.adopt_key`
-  - Migration path for an existing install. Prompt for the current
-    base64 `CLOAK_KEY` and a password, wrap that key, write the row. Afterwards
-    remove `CLOAK_KEY` from the environment and restart.
-- `mix local_proxy.reset_vault`
-  - Destructive. Requires typed confirmation. Deletes the `vault_keys` row and
-    clears every route's headers. Headers created afterward use a new `K`.
-    Never silently regenerate when the envelope fails to unwrap.
+    new password, rewrap, and update in one transaction.
+  - Changing the password only rewraps `K`. It does not rotate the data key, so
+    old database copies remain decryptable with the old password.
+  - Never regenerate silently when the envelope fails to unwrap.
+
+There is no `adopt_key` task and no `reset_vault` task. This app is per-machine
+and not migrateable.
+
+To reset, stop the app and delete the SQLite database and its sidecars:
+
+```sh
+rm -f local_proxy_dev.db local_proxy_dev.db-wal local_proxy_dev.db-shm
+```
+
+In production, use the configured `DATABASE_PATH` and delete the matching
+`-wal` and `-shm` files. Then run `mix ecto.reset` in dev, or start the release
+once so `Ecto.Migrator` creates the schema. Finally run
+`mix local_proxy.set_password` (or the release `eval` equivalent) and start the
+app. All routes and inbound keys are re-created manually. There is no backup or
+restore path.
 
 Boot order stays `KeyRing` (stateless) → `Vault` → `Repo`. The vault no longer
 needs a key to start, so `lib/local_proxy/application.ex:12` can stay where it
 is.
 
-### Optional `CLOAK_KEY` override
-
-For CI and headless runs, keep `CLOAK_KEY` as a deprecated escape hatch: if set
-and valid, unlock `KeyRing` at boot. The UI still requires the password and the
-wrapped row. An install running this way is not protected from environment
-reads, which is exactly why it is opt-in and documented as such. The default is
-no `CLOAK_KEY`.
-
-`ADMIN_PASSWORD` is removed entirely. `ADMIN_USER` stays. `SECRET_KEY_BASE`
-stays for cookie signing.
+There is no `CLOAK_KEY` override. `ADMIN_PASSWORD` is removed entirely.
+`ADMIN_USER` is optional and defaults to `admin`. `SECRET_KEY_BASE` is generated
+per BEAM start and is not read from the environment.
 
 ## Configuration changes
 
@@ -308,21 +377,52 @@ Remove from the required list in `planning/app_design.md`:
 
 - `CLOAK_KEY` — replaced by the wrapped key and sign-in unlock.
 - `ADMIN_PASSWORD` — replaced by the password that wraps the key.
+- `INBOUND_PROXY_KEY` — replaced by per-route inbound keys stored encrypted
+  under `K`.
+- `SECRET_KEY_BASE` — generated per BEAM start.
 
 Keep:
 
-- `ADMIN_USER`
-- `INBOUND_PROXY_KEY` (still an environment secret; see Open questions)
-- `SECRET_KEY_BASE`, `DATABASE_PATH` (prod only)
+- `ADMIN_USER` — optional, default `admin`, not secret.
+- `DATABASE_PATH` (prod only)
 - Ports, timeout, body limit
 
 New optional:
 
-- `UNLOCK_TTL_MINUTES` — idle lock, default off.
-- `CLOAK_KEY` — deprecated override, default unset.
+- None. Idle lock is deferred.
 
-`config/runtime.exs:62-77` shrinks to reading `ADMIN_USER`,
-`INBOUND_PROXY_KEY`, and the optional `CLOAK_KEY`.
+`config/runtime.exs` no longer reads `CLOAK_KEY`, `ADMIN_PASSWORD`,
+`INBOUND_PROXY_KEY`, or `SECRET_KEY_BASE`. It sets `ADMIN_USER` to the env value
+or `admin`, parses ports and limits, and generates a per-boot signing secret.
+Remove `LocalProxy.Config.decode_cloak_key/1` and
+`decode_cloak_key!/1` if nothing else uses them. Update `config/test.exs` to
+unlock `KeyRing` with a fixed test key in setup and to drop the old
+`:admin.password` and `:inbound_proxy_key` values.
+
+Each inbound route stores its own `inbound_key`, encrypted with AshCloak under
+`K`. The caller supplies that key in `X-Proxy-Key`. There is no global inbound
+key and no tunnel-side key injection assumption.
+
+### README environment variables
+
+The README must state that there are no required secret environment variables.
+List only these optional variables:
+
+- `ADMIN_USER` — sign-in username, default `admin`; not secret.
+- `OUTBOUND_PORT` — default `4000`.
+- `INBOUND_PORT` — default `4001`.
+- `UPSTREAM_TIMEOUT_MS` — default `30000`.
+- `MAX_BODY_BYTES` — default `10485760`.
+- `DATABASE_PATH` — production SQLite path.
+- `POOL_SIZE` — production SQLite pool size, default `10`.
+- `PHX_HOST` — production URL host.
+- `DNS_CLUSTER_QUERY` — optional single-node clustering query.
+- `PHX_SERVER=true` — release start only.
+- `ERL_CRASH_DUMP_SECONDS=0` — recommended BEAM setting, not read by the app.
+
+Do not list `CLOAK_KEY`, `ADMIN_PASSWORD`, `INBOUND_PROXY_KEY`, or
+`SECRET_KEY_BASE`. `.env.example` must also drop them and contain only optional
+non-secret values.
 
 ## Data model additions
 
@@ -332,9 +432,19 @@ AshAdmin.
 - `id` — string primary key, `"default"`.
 - `wrapped` — binary, `allow_nil?: false`.
 - `inserted_at`, `updated_at`.
-- Actions: `read`, `upsert`. No UI, no policies; single-user tool.
-- Migration creates the table with a check or a fixed PK so only one row can
-  exist.
+- Actions: primary `read`, primary `create`, and primary `update`.
+- Migration creates the table with a fixed primary key and a SQLite trigger that
+  rejects any `id` other than `'default'`.
+- No UI, no policies; single-user tool.
+
+`LocalProxy.Routing.Route` gains:
+
+- `inbound_key` — string, nullable, encrypted by AshCloak alongside `headers`.
+  Required for enabled inbound routes, nil for outbound, 32–256 characters.
+  The UI generates, shows once, and rotates it immediately; the old key stops
+  working at once. Generated values use 32 random bytes encoded with
+  `Base.url_encode64(..., padding: false)`. It is never logged or shown in
+  AshAdmin.
 
 Do not add a password hash column. The AEAD tag is the verifier.
 
@@ -343,20 +453,26 @@ Do not add a password hash column. The AEAD tag is the verifier.
 Add to the proxy error list in `planning/app_design.md`:
 
 - `503` `{"error":"vault_locked","status":503}`
+- Inbound `401` `{"error":"unauthorized","status":401}` now covers unknown
+  path, missing route key, and wrong key.
 
-No route, target, or timing information is included while locked.
+No route, target, or timing information is included while locked. Unknown
+inbound paths and bad keys are indistinguishable.
 
 ## Testing
 
 Vault and envelope:
 
-- Locked `encrypt/2` returns a `LockedError`; locked `decrypt/2` returns
-  `:error`.
+- Locked `encrypt/2` and `decrypt/2` return `{:error, %LockedError{}}`; bang
+  functions raise `LockedError`, never `CaseClauseError`.
+- A tampered or unauthentic ciphertext returns `{:error, %DecryptError{}}`;
+  `decrypt!` raises `DecryptError`, never `CaseClauseError`.
 - `can_decrypt?/2` still identifies `"AES.GCM.V1"` ciphertext while locked.
 - Unlock installs the key; encrypt/decrypt round-trip.
 - Wrong password fails unwrap and leaves the vault locked.
 - Tampered envelope (salt, IV, tag, ciphertext) fails unwrap.
-- Envelope version byte is rejected when unknown.
+- Envelope version byte and iteration range are validated; out-of-range values
+  are rejected without running the KDF.
 - Ciphertext produced by the old `AES.GCM` configuration decrypts through the
   wrapper with the same tag and `iv_length: 12`.
 - The raw key is never present in the `vault_keys` row.
@@ -366,7 +482,9 @@ Login and sessions:
 - Login with the correct password unlocks and sets the generation.
 - Login with a wrong password returns 401 and does not unlock.
 - Login while already unlocked still verifies the unwrap.
+- The sixth failed login in a minute returns 429; a success resets the counter.
 - A session with a stale or missing generation is redirected to `/login`.
+- `SessionController.new/2` does not redirect a stale session into a loop.
 - A valid cookie from before an app restart is rejected while locked.
 - Logout drops the session and locks the vault.
 - `RequireAuth` is applied to `/routes` and `/admin`; LiveView mounts check the
@@ -378,34 +496,49 @@ Proxy:
   the target.
 - They work after unlock.
 - `/health` returns 200 and reports `locked` before sign-in.
+- Per-route inbound keys reject another route's key with 401.
+- No route and bad key return the same 401.
 
-Mix tasks:
+Mix tasks and reset:
 
 - `set_password` creates the row on first run and rewraps on rotation.
-- `adopt_key` wraps a supplied base64 key and the resulting vault decrypts
-  existing fixtures.
-- `reset_vault` clears headers and the row.
+- Password prompts never echo; the task never reads the password from env or
+  argv.
+- Reset by deleting the database and sidecars, recreating the schema, and
+  running `set_password` produces a working locked-then-unlocked vault.
 
 ## Deltas to `planning/app_design.md`
 
 - Decisions: replace "Secrets fail fast at boot" with "the vault is locked at
-  boot and unlocks on sign-in". Add the 503 state.
+  boot and unlocks on sign-in". Remove `CLOAK_KEY`, `ADMIN_PASSWORD`,
+  `INBOUND_PROXY_KEY`, and `SECRET_KEY_BASE` from the environment. Add the 503
+  state and per-route inbound keys.
 - Modules: add `LocalProxy.Vault.KeyRing`, `LocalProxy.Vault.Cipher`,
-  `LocalProxy.Vault.Key`, and the three mix tasks.
+  `LocalProxy.Vault.Envelope`, `LocalProxy.Vault.Key`,
+  `LocalProxy.Vault.KeyStore`, `LocalProxy.Vault.LoginLimiter`,
+  `LocalProxy.Vault.LockedError`, `LocalProxy.Vault.DecryptError`,
+  `LocalProxy.Routing.InboundKey`, `LocalProxyWeb.LiveUserAuth`, and
+  `LocalProxyWeb.Plugs.VaultGate`. `set_password` is the only new mix task.
 - Encryption: replace the `CLOAK_KEY` paragraph with the envelope and wrapper
   design above. Note the unchanged `"AES.GCM.V1"` / `iv_length: 12` format.
-- Configuration: drop `CLOAK_KEY` and `ADMIN_PASSWORD` from required secrets;
-  `ADMIN_USER` remains.
+  Add `inbound_key` to AshCloak attributes and `on_decrypt`.
+- Configuration: drop all secret environment variables. `ADMIN_USER` is
+  optional and defaults to `admin`. `SECRET_KEY_BASE` is generated per boot.
 - Request flow: gate both directions on `KeyRing.locked?/0` before route
-  lookup.
-- Error responses: add `503 vault_locked`.
+  lookup. Inbound matches the route first, then checks that route's key.
+- Error responses: add `503 vault_locked`; inbound unknown route and bad key
+  are both 401.
 - Security notes: replace "changing `CLOAK_KEY`" with "losing the password".
-  Add the threat-model section from this document.
-- Testing: add the vault, envelope, session, and locked-proxy cases.
-- Build phases: add Phase 4 — vault hardening, after the current three.
+  Document that password rotation does not rotate the data key, remote unlock
+  is impossible, and an unlocked proxy can be used by an agent.
+- Testing: add the vault, envelope, session, locked-proxy, rate-limit, and
+  per-route inbound key cases.
+- Build phases: fold vault hardening into Phase 1 and per-route inbound keys
+  into Phase 3; no separate Phase 4.
 - README: document `mix local_proxy.set_password` as a required first-run step,
-  the unlock-on-login workflow, the 503 window after restarts, and how to adopt
-  an existing `CLOAK_KEY`.
+  the unlock-on-login workflow, the 503 window after restarts, resetting by
+  deleting the database, local-only unlock, and per-route inbound keys supplied
+  by callers such as Smartsuite.
 
 ## Alternatives considered
 
@@ -429,15 +562,4 @@ Mix tasks:
 
 ## Open questions
 
-- Should `INBOUND_PROXY_KEY` also move behind the sign-in unlock? An agent can
-  read it today and call the inbound listener directly on loopback, which lets
-  it reach local services. It does not expose injected headers, but it may be
-  worth deriving it from the same password.
-- Should signing out really stop the proxy, or should logout end the session
-  while a separate "Lock" action wipes the key? Locking on sign-out is safer;
-  it is also surprising for local apps. Default to lock, revisit if noisy.
-- Idle lock default: off, or something like eight hours?
-- Do we want a per-route "sensitive" flag that forces re-authentication before
-  the test button or reveal? Not needed for the stated threat model, since
-  those actions already require a session and a session now requires the
-  password.
+None.

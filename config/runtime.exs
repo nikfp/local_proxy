@@ -60,22 +60,16 @@ config :local_proxy, :proxy,
   max_body_bytes: max_body_bytes
 
 if config_env() != :test do
-  config :local_proxy, LocalProxy.Vault,
-    key: LocalProxy.Config.decode_cloak_key!(System.get_env("CLOAK_KEY"))
-
-  config :local_proxy, :admin,
-    user:
-      System.get_env("ADMIN_USER") ||
-        raise("environment variable ADMIN_USER is missing"),
-    password:
-      System.get_env("ADMIN_PASSWORD") ||
-        raise("environment variable ADMIN_PASSWORD is missing")
-
-  config :local_proxy,
-         :inbound_proxy_key,
-         System.get_env("INBOUND_PROXY_KEY") ||
-           raise("environment variable INBOUND_PROXY_KEY is missing")
+  config :local_proxy, :admin, user: System.get_env("ADMIN_USER") || "admin"
 end
+
+secret_key_base = Base.encode64(:crypto.strong_rand_bytes(64))
+
+config :local_proxy, LocalProxyWeb.Endpoint, secret_key_base: secret_key_base
+config :local_proxy, LocalProxyWeb.InboundEndpoint, secret_key_base: secret_key_base
+
+config :ash,
+  keyset_signing_secret: :crypto.mac(:hmac, :sha256, secret_key_base, "ash keyset signing")
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
@@ -106,18 +100,8 @@ if config_env() == :prod do
     database: database_path,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
 
-  # The secret key base is used to sign/encrypt cookies and other secrets.
-  # A default value is used in config/dev.exs and config/test.exs but you
-  # want to use a different value for prod and you most likely don't want
-  # to check this value into version control, so we use an environment
-  # variable instead.
-  secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
-
+  # The secret key base is generated above for every environment. Sessions
+  # therefore do not survive a restart, which matches the vault locking on boot.
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :local_proxy, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
@@ -128,20 +112,7 @@ if config_env() == :prod do
       # The outbound listener also serves the UI and admin. It must only listen
       # on loopback; the tunnel points at the separate inbound listener.
       ip: {127, 0, 0, 1}
-    ],
-    secret_key_base: secret_key_base
-
-  config :local_proxy, LocalProxyWeb.InboundEndpoint, secret_key_base: secret_key_base
-
-  config :ash,
-    keyset_signing_secret:
-      :crypto.mac(
-        :hmac,
-        :sha256,
-        System.get_env("SECRET_KEY_BASE") ||
-          raise("environment variable SECRET_KEY_BASE is missing"),
-        "ash keyset signing"
-      )
+    ]
 
   # ## SSL Support
   #

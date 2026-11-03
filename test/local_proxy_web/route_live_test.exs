@@ -13,7 +13,12 @@ defmodule LocalProxyWeb.RouteLiveTest do
   }
 
   defp authed_conn(conn) do
-    init_test_session(conn, %{admin_authenticated: true})
+    {:ok, generation} = LocalProxy.Vault.KeyRing.generation()
+
+    init_test_session(conn, %{
+      admin_authenticated: true,
+      unlock_generation: generation
+    })
   end
 
   defp create_route(attrs \\ %{}) do
@@ -106,7 +111,8 @@ defmodule LocalProxyWeb.RouteLiveTest do
       route: %{
         "direction" => "inbound",
         "path_prefix" => "/svc",
-        "target_url" => "http://localhost:3000"
+        "target_url" => "http://localhost:3000",
+        "inbound_key" => "test-inbound-key-0123456789abcdef"
       }
     )
     |> render_submit()
@@ -116,6 +122,63 @@ defmodule LocalProxyWeb.RouteLiveTest do
     assert updated.direction == :inbound
     assert updated.slug == nil
     assert updated.path_prefix == "/svc"
+  end
+
+  test "creates an inbound route with a pasted key", %{conn: conn} do
+    key = "test-inbound-key-0123456789abcdef"
+    {:ok, view, _html} = live(authed_conn(conn), ~p"/routes/new")
+
+    view = choose_direction(view, "inbound")
+
+    view
+    |> form("#route-form",
+      route: %{
+        "name" => "Local",
+        "direction" => "inbound",
+        "path_prefix" => "/api",
+        "target_url" => "http://localhost:3000",
+        "enabled" => "true",
+        "inbound_key" => key
+      }
+    )
+    |> render_change()
+
+    assert render(view) =~ key
+
+    view
+    |> form("#route-form")
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    route = Routing.get_route_by_path_prefix!("/api", load: [:inbound_key])
+    assert route.inbound_key == key
+  end
+
+  test "masks a stored inbound key and preserves it when saving other changes", %{conn: conn} do
+    key = "test-inbound-key-0123456789abcdef"
+
+    route =
+      Routing.create_route!(%{
+        name: "Local",
+        direction: :inbound,
+        path_prefix: "/api",
+        target_url: "http://localhost:3000",
+        inbound_key: key
+      })
+
+    {:ok, view, html} = live(authed_conn(conn), ~p"/routes/#{route.id}/edit")
+
+    refute html =~ key
+    assert html =~ "••••"
+
+    view
+    |> form("#route-form", route: %{"name" => "Renamed"})
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    updated = Routing.get_route!(route.id, load: [:inbound_key])
+    assert updated.name == "Renamed"
+    assert updated.inbound_key == key
   end
 
   test "reveals a stored header value without rendering it initially", %{conn: conn} do
@@ -156,7 +219,8 @@ defmodule LocalProxyWeb.RouteLiveTest do
       name: "Local",
       direction: :inbound,
       path_prefix: "/api",
-      target_url: "http://localhost:3000"
+      target_url: "http://localhost:3000",
+      inbound_key: "test-inbound-key-0123456789abcdef"
     })
 
     {:ok, _view, html} = live(authed_conn(conn), ~p"/routes")
@@ -203,7 +267,8 @@ defmodule LocalProxyWeb.RouteLiveTest do
       name: "Local",
       direction: :inbound,
       path_prefix: "/api",
-      target_url: "http://localhost:3000"
+      target_url: "http://localhost:3000",
+      inbound_key: "test-inbound-key-0123456789abcdef"
     })
 
     {:ok, view, _html} = live(authed_conn(conn), ~p"/routes")

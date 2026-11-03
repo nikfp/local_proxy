@@ -2,11 +2,18 @@
   <div class="mx-auto w-full max-w-sm">
     <div class="rounded-xl border border-base-300 bg-base-100 p-6 shadow-sm">
       <h1 class="text-lg font-semibold">Sign in</h1>
-      <p class="mt-1 text-sm text-base-content/60">
-        Use the admin credentials configured on this machine.
+
+      <p :if={@setup} class="mt-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+        No vault is configured yet. Run
+        <code class="font-mono">mix local_proxy.set_password</code>
+        on this machine, then reload this page.
       </p>
 
-      <form action={~p"/login"} method="post" class="mt-6 grid gap-4">
+      <p :if={not @setup} class="mt-1 text-sm text-base-content/60">
+        Signing in unlocks the encrypted route headers and inbound keys.
+      </p>
+
+      <form :if={not @setup} action={~p"/login"} method="post" class="mt-6 grid gap-4">
         <input type="hidden" name="_csrf_token" value={@csrf_token} />
 
         <.input

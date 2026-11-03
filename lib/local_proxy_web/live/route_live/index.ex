@@ -7,6 +7,8 @@ defmodule LocalProxyWeb.RouteLive.Index do
   alias LocalProxy.Proxy.Request
   alias LocalProxy.Proxy.Result
   alias LocalProxy.Routing
+  alias LocalProxy.Vault.DecryptError
+  alias LocalProxy.Vault.LockedError
 
   @impl true
   def mount(_params, _session, socket) do
@@ -61,22 +63,30 @@ defmodule LocalProxyWeb.RouteLive.Index do
     request = %Request{method: "GET", path: "/", query: "", headers: [], body: ""}
 
     result =
-      case Proxy.forward(route, request) do
-        {:ok, %Result{} = result} ->
-          %{
-            status: result.status,
-            duration_ms: result.duration_ms,
-            body: preview(result.body),
-            error: nil
-          }
+      try do
+        case Proxy.forward(route, request) do
+          {:ok, %Result{} = result} ->
+            %{
+              status: result.status,
+              duration_ms: result.duration_ms,
+              body: preview(result.body),
+              error: nil
+            }
 
-        {:error, reason, duration_ms} ->
-          %{
-            status: error_status(reason),
-            duration_ms: duration_ms,
-            body: "",
-            error: to_string(reason)
-          }
+          {:error, reason, duration_ms} ->
+            %{
+              status: error_status(reason),
+              duration_ms: duration_ms,
+              body: "",
+              error: to_string(reason)
+            }
+        end
+      rescue
+        LockedError ->
+          %{status: 503, duration_ms: 0, body: "", error: "vault_locked"}
+
+        DecryptError ->
+          %{status: 500, duration_ms: 0, body: "", error: "decrypt_error"}
       end
 
     {:noreply, assign(socket, :test_results, Map.put(socket.assigns.test_results, id, result))}

@@ -8,7 +8,8 @@ defmodule LocalProxyWeb.Endpoint do
     store: :cookie,
     key: "_local_proxy_key",
     signing_salt: "m9l5TMz9",
-    same_site: "Lax"
+    same_site: "Lax",
+    max_age: 43_200
   ]
 
   socket "/live", Phoenix.LiveView.Socket,

@@ -50,9 +50,18 @@ defmodule LocalProxyWeb do
 
   def live_view do
     quote do
-      use Phoenix.LiveView
+      use Phoenix.LiveView,
+        on_mount: [{LocalProxyWeb.LiveUserAuth, :ensure_unlocked}]
 
       unquote(html_helpers())
+
+      @impl Phoenix.LiveView
+      def handle_info(:vault_locked, socket) do
+        {:noreply,
+         socket
+         |> put_flash(:error, "The vault was locked. Sign in again.")
+         |> push_navigate(to: "/login")}
+      end
     end
   end
 

@@ -49,31 +49,6 @@ defmodule LocalProxy.Config do
   end
 
   @doc """
-  Decodes a base64-encoded 32-byte AES key.
-  """
-  def decode_cloak_key(nil), do: {:error, "CLOAK_KEY is missing"}
-
-  def decode_cloak_key(value) when is_binary(value) do
-    with {:ok, key} <- Base.decode64(String.trim(value)),
-         true <- byte_size(key) == 32 do
-      {:ok, key}
-    else
-      :error -> {:error, "CLOAK_KEY must be valid base64"}
-      false -> {:error, "CLOAK_KEY must decode to 32 bytes"}
-    end
-  end
-
-  @doc """
-  Same as `decode_cloak_key/1`, but raises on invalid input.
-  """
-  def decode_cloak_key!(value) do
-    case decode_cloak_key(value) do
-      {:ok, key} -> key
-      {:error, message} -> raise "invalid CLOAK_KEY: #{message}"
-    end
-  end
-
-  @doc """
   Parses a positive integer setting, falling back to `default`.
   """
   def parse_positive_integer(nil, default), do: {:ok, default}

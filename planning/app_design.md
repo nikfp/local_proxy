@@ -9,9 +9,9 @@ two directions.
    injects configured headers and forwards the request to an external URL. The
    upstream response is returned to the caller.
 2. **Inbound (internet → local).** A Cloudflare tunnel exposes this app. Requests
-   authenticate with a shared key, match a path prefix, get configured headers
-   injected, and are forwarded to a local endpoint. The response is returned to
-   the caller.
+   carry the matched route's key in `X-Proxy-Key`, match a path prefix, get
+   configured headers injected, and are forwarded to a local endpoint. The
+   response is returned to the caller.
 
 ## Decisions
 
@@ -19,9 +19,10 @@ two directions.
   path prefix only. There is one public Cloudflare hostname, so no host field.
 - Forwarding strips the matched prefix and appends the remainder to the target's
   base path. Query strings are preserved.
-- Inbound auth is a single shared key in `X-Proxy-Key`, compared against
-  `INBOUND_PROXY_KEY` before route lookup. The header is stripped before
-  forwarding.
+- Inbound auth is per route. The caller supplies the route's key in
+  `X-Proxy-Key`; the listener matches the route by path prefix, decrypts that
+  route's `inbound_key`, and compares it before forwarding. The header is
+  stripped before forwarding. Unknown prefixes and bad keys both return 401.
 - Outbound requires no auth because the outbound listener binds to `127.0.0.1`
   and is never exposed through the tunnel.
 - Two listeners: a local listener for outbound routes and the UI, and an
@@ -44,17 +45,29 @@ two directions.
 - No request history in the database. Logs contain route, method, path, status,
   and timing only.
 - Custom LiveViews for route management, AshAdmin kept at `/admin`. Both sit
-  behind a session sign-in using `ADMIN_USER` and `ADMIN_PASSWORD`.
+  behind a password sign-in that also unlocks the vault.
 - Root `/` redirects to `/routes`. `GET /health` is unauthenticated.
-- Secrets fail fast at boot in dev and prod. Test uses fixed fixture values.
+- The vault is locked at boot and unlocks when a human signs in locally. There
+  is no `CLOAK_KEY`, `ADMIN_PASSWORD`, `INBOUND_PROXY_KEY`, or
+  `SECRET_KEY_BASE` environment variable. `SECRET_KEY_BASE` is generated per
+  BEAM start. `ADMIN_USER` is optional and defaults to `admin`; it is not
+  secret.
+- Remote unlock is impossible by design. The UI and login exist only on the
+  loopback-bound outbound listener. If no human is at the machine, a restarted
+  app stays locked and the tunnel returns 503.
+- Changing the admin password only rewraps the data key. It does not rotate the
+  data key, so old database copies remain decryptable with the old password.
+- There is no backup, restore, migration, or key-adoption path. Recovery from a
+  lost password or corrupted vault is to delete the SQLite database and set a
+  new password, which also removes all routes.
 - Build order: data model and UI, then outbound, then inbound.
 
 ## Architecture
 
 ```
-Local app ──► 127.0.0.1:<OUTBOUND_PORT>/r/:slug/... ──► Proxy.forward ──► external URL
-Browser ────► 127.0.0.1:<OUTBOUND_PORT>/routes       ──► sign-in ──► RouteLive
-Cloudflare ─► tunnel ─► 127.0.0.1:<INBOUND_PORT>/*   ──► InboundAuth ─► Proxy.forward ─► localhost
+Local app ──► 127.0.0.1:<OUTBOUND_PORT>/r/:slug/... ──► VaultGate ──► Proxy.forward ──► external URL
+Browser ────► 127.0.0.1:<OUTBOUND_PORT>/routes       ──► sign-in/unlock ──► RouteLive
+Cloudflare ─► tunnel ─► 127.0.0.1:<INBOUND_PORT>/*   ──► VaultGate ──► InboundAuth ──► Proxy.forward ──► localhost
 ```
 
 Two Phoenix endpoints run in one VM. `LocalProxyWeb.Endpoint` listens on the
@@ -67,19 +80,35 @@ policy, and the listening endpoint differ.
 
 ### Modules
 
-- `LocalProxy.Vault` — Cloak vault, key from `CLOAK_KEY`.
+- `LocalProxy.Vault` — Cloak vault with a static wrapper cipher; the key comes
+  from the keyring at call time.
+- `LocalProxy.Vault.KeyRing` — process-wide in-memory key and generation.
+- `LocalProxy.Vault.Cipher` — Cloak cipher wrapper that reads the keyring.
+- `LocalProxy.Vault.Envelope` — password KDF and AES-GCM key wrapping.
+- `LocalProxy.Vault.Key` — Ash resource for the wrapped data key.
+- `LocalProxy.Vault.KeyStore` — create, unwrap, and rewrap the vault key.
+- `LocalProxy.Vault.LoginLimiter` — in-memory failed-login limiter.
+- `LocalProxy.Vault.LockedError` — clean locked-state exception.
+- `LocalProxy.Vault.DecryptError` — clean ciphertext/authentication failure.
+- `LocalProxy.Routing.InboundKey` — per-route key generation.
 - `LocalProxy.Routing` — Ash domain.
 - `LocalProxy.Routing.Route` — the route resource.
 - `LocalProxy.Proxy` — path rewrite, header merge, Req call, error mapping.
 - `LocalProxy.Proxy.Result` — status, headers, body, duration in ms.
-- `LocalProxyWeb.Plugs.RequireAuth` — redirects unauthenticated UI requests.
-- `LocalProxyWeb.SessionController` — sign-in and sign-out.
-- `LocalProxyWeb.Plugs.InboundAuth` — `X-Proxy-Key` check.
+- `LocalProxyWeb.Plugs.RequireAuth` — redirects unauthenticated or stale UI
+  requests.
+- `LocalProxyWeb.Plugs.VaultGate` — returns 503 before proxy route lookup while
+  locked.
+- `LocalProxyWeb.SessionController` — sign-in, unlock, and sign-out.
+- `LocalProxyWeb.Plugs.InboundAuth` — matches the inbound route, checks its
+  `X-Proxy-Key`, and assigns the route.
 - `LocalProxyWeb.ProxyController` — dispatches outbound and inbound requests.
 - `LocalProxyWeb.InboundEndpoint` — listener used by the tunnel.
 - `LocalProxyWeb.InboundRouter` — health plus authenticated inbound catch-all.
-- `LocalProxyWeb.RouteLive.Index` and `RouteLive.Form` — config UI.
+- `LocalProxyWeb.RouteLive.Index` and `RouteLive.Form` — config UI, including
+  inbound key generation and rotation.
 - `LocalProxyWeb.HealthController` — `GET /health`.
+- `LocalProxyWeb.LiveUserAuth` — LiveView mount and lock handling.
 
 ## Data model
 
@@ -98,6 +127,11 @@ Fields:
 - `target_url` — string, required. `http` or `https`, host present, optional
   base path, no query, no fragment, no userinfo.
 - `headers` — map, required, default `%{}`. Cloaked by AshCloak.
+- `inbound_key` — string, nullable. Required for enabled inbound routes; must
+  be nil for outbound routes. Cloaked by AshCloak. The caller sends it in
+  `X-Proxy-Key`. Generated by the UI or pasted by the operator; 32–256
+  characters, with generated values using 32 random bytes encoded with
+  `Base.url_encode64(..., padding: false)`.
 - `enabled` — boolean, required, default `true`.
 - `retries` — boolean, required, default `false`.
 - `inserted_at`, `updated_at` — timestamps.
@@ -106,6 +140,9 @@ Validations and identities:
 
 - Direction-specific requiredness for `slug` and `path_prefix`. Reject a route
   that sets both, or neither.
+- `inbound_key` is required when `direction == :inbound` and `enabled == true`;
+  it must be nil for outbound routes. Rotation replaces the key immediately;
+  the previous key stops working at once.
 - Unique identity on `slug` and on `path_prefix`, plus a unique index in the
   migration. Collisions are detected on create and update and surface as a form
   error, with the DB constraint as backstop.
@@ -119,7 +156,8 @@ Validations and identities:
   `te`, `trailer`, `transfer-encoding`, `upgrade`.
 - Inbound `target_url` host must be `localhost`, `127.0.0.0/8`, or `::1`.
   Resolve `localhost` at validation and at request time and require every
-  result to be loopback. Reject anything else with a clear error.
+  result to be loopback. Reject anything else with a clear error. `localhost`
+  is allowed deliberately; reject only when it resolves outside loopback.
 
 Actions: `read`, `create`, `update`, `destroy`. No Ash policies; the operator is
 single-user and the UI is protected by a session sign-in. AshAdmin is likewise
@@ -132,32 +170,37 @@ behind the sign-in.
 ```elixir
 cloak do
   vault LocalProxy.Vault
-  attributes [:headers]
+  attributes [:headers, :inbound_key]
   encrypt_nil? false
+  on_decrypt &LocalProxy.Vault.Cipher.on_decrypt/4
 end
 ```
 
-AshCloak renames the column to `encrypted_headers`, adds a calculation named
-`headers`, and encrypts on write and decrypts when the calculation is loaded.
-Maps are supported because values are encoded as Erlang terms. Phase 1 includes
-a round-trip test and a raw SQL check that the plaintext is absent from the
-stored column.
+AshCloak renames the columns to `encrypted_headers` and `encrypted_inbound_key`,
+adds calculations named `headers` and `inbound_key`, and encrypts on write and
+decrypts when the calculations are loaded. Maps are supported because values are
+encoded as Erlang terms. Phase 1 includes a round-trip test and a raw SQL check
+that neither plaintext is present in the stored columns.
 
-`LocalProxy.Vault` reads `CLOAK_KEY` in `init/1`, base64-decodes it, and uses
-`Cloak.Ciphers.AES.GCM` with tag `"AES.GCM.V1"`. Boot fails if the key is
-missing, not valid base64, or not 32 bytes. The vault starts before the Repo in
-the supervision tree.
+`LocalProxy.Vault` no longer reads `CLOAK_KEY`. It uses
+`Cloak.Ciphers.AES.GCM` through `LocalProxy.Vault.Cipher` with tag
+`"AES.GCM.V1"` and `iv_length: 12`. The data key is unwrapped at login and held
+in `LocalProxy.Vault.KeyRing`; while locked, encryption and decryption return
+`LocalProxy.Vault.LockedError`. See `planning/hardening.md` for the envelope,
+KDF, and locked behavior.
+
+There is no migration from `CLOAK_KEY`. Existing development databases are
+discarded by deleting the SQLite files and recreating the schema.
 
 ## Configuration
 
-Required at boot in every environment except `test` (which uses fixed fixtures):
-
-- `CLOAK_KEY` — base64-encoded 32-byte AES key.
-- `INBOUND_PROXY_KEY` — shared key for inbound requests.
-- `ADMIN_USER`, `ADMIN_PASSWORD` — sign-in for `/routes` and `/admin`.
+There are no required secret environment variables. The vault key, admin
+password, inbound route keys, and cookie signing secret are not read from the
+environment.
 
 Optional:
 
+- `ADMIN_USER` — sign-in username, default `admin`. Not secret.
 - `OUTBOUND_PORT` — local listener, default `4000`. Parsed as an integer, must
   be 1–65535; an invalid value fails at boot with a clear message. Serves the
   UI, admin, `/health`, and outbound `/r` routes. Browsers and local callers use
@@ -167,13 +210,18 @@ Optional:
   here.
 - `UPSTREAM_TIMEOUT_MS` — default `30000`.
 - `MAX_BODY_BYTES` — default `10485760`.
-- `DATABASE_PATH`, `SECRET_KEY_BASE` — prod only, already used by
-  `config/runtime.exs`.
+- `DATABASE_PATH` — prod only, already used by `config/runtime.exs`.
+
+`SECRET_KEY_BASE` is generated once per BEAM start with
+`:crypto.strong_rand_bytes(64) |> Base.encode64()` and shared by both endpoints
+and the Ash keyset signing secret. Sessions therefore do not survive a restart,
+which is consistent with the vault locking on boot. This app is single-node and
+local-only; do not use generated secrets in a cluster.
 
 Both listeners bind to `{127, 0, 0, 1}` in dev and prod. The two ports must
 differ; boot fails with a clear message otherwise. Ports only change the listen
-ports. Secrets are exported in the shell; README documents the exports. No
-`.env` loader and no generated defaults.
+ports. No `.env` loader and no generated defaults other than the signing secret
+and `ADMIN_USER` default.
 
 `runtime.exs` stores validated values in application env, so request-time code
 does not re-read the environment.
@@ -182,7 +230,7 @@ does not re-read the environment.
 
 Local listener (`OUTBOUND_PORT`, never tunneled):
 
-- `GET /health` — no pipeline, returns 200 `{"status":"ok"}`.
+- `GET /health` — no pipeline, returns 200 with `status` and `vault`.
 - `GET /` — browser pipeline, redirects to `/routes`.
 - `GET /login`, `POST /login` — sign-in form and credential check.
 - `POST /logout` — clears the session.
@@ -194,13 +242,13 @@ Local listener (`OUTBOUND_PORT`, never tunneled):
 
 Inbound listener (`INBOUND_PORT`, the tunnel origin):
 
-- `GET /health` — no pipeline, returns 200 `{"status":"ok"}`.
-- `match /*path` — `InboundAuth`, then the inbound forwarder.
+- `GET /health` — no pipeline, returns 200 with `status` and `vault`.
+- `match /*path` — `VaultGate`, then `InboundAuth` with the matched route's
+  key, then the inbound forwarder.
 
 The inbound listener has no UI, admin, static assets, LiveView socket, or
 outbound `/r` routes. A tunnel request to `/r/...` or `/routes` matches the
-catch-all, passes auth only if the key is present, and then returns 404 because
-no inbound prefix matches.
+catch-all, fails inbound route/key matching, and returns 401.
 
 ## Request flow
 
@@ -232,19 +280,22 @@ Examples:
 
 ### Inbound
 
-1. Check `X-Proxy-Key` before anything else. Missing or wrong → 401 JSON with
-   `WWW-Authenticate` omitted (this is not a browser prompt). Compare with
-   `Plug.Crypto.secure_compare/2`, with a length check first.
-2. Load enabled inbound routes and pick the route whose `path_prefix` matches
-   exactly or as a path segment. Longest prefix wins.
-3. No match → 404 JSON.
-4. Method check, body read, header merge, and forward as in outbound. Strip
+1. If the vault is locked, return 503 before route lookup.
+2. Match the request path against enabled inbound routes by longest
+   `path_prefix`; matching is exact or path-segment aware.
+3. No match → 401 JSON. Do not distinguish no-route from bad-key.
+4. Load and decrypt the matched route's `inbound_key`. If it is missing or does
+   not match `X-Proxy-Key`, return 401 JSON with `WWW-Authenticate` omitted.
+   Compare with `Plug.Crypto.secure_compare/2`, with a length check first.
+5. Assign the matched route to `conn.assigns` so the controller does not look it
+   up twice.
+6. Method check, body read, header merge, and forward as in outbound. Strip
    `X-Proxy-Key` from the forwarded headers even if a route did not inject it.
-5. Validate the target is still loopback at request time; otherwise 502.
-6. Return the upstream response with the same response header rules.
+7. Validate the target is still loopback at request time; otherwise 502.
+8. Return the upstream response with the same response header rules.
 
-Example: prefix `/api` and target `http://localhost:3000` maps
-`/api/users?x=1` → `http://localhost:3000/users?x=1`.
+Example: prefix `/api` with key `k1` and target `http://localhost:3000` maps
+`/api/users?x=1` with `X-Proxy-Key: k1` → `http://localhost:3000/users?x=1`.
 
 ### Req options
 
@@ -264,13 +315,16 @@ Example: prefix `/api` and target `http://localhost:3000` maps
 All proxy-generated errors are JSON with `error` and `status`, plus `route` when
 a route was matched.
 
-- `401` `{"error":"unauthorized","status":401}`
-- `404` `{"error":"no_route","status":404}`
+- `401` `{"error":"unauthorized","status":401}` — inbound no route, missing
+  key, or wrong key
+- `404` `{"error":"no_route","status":404}` — outbound missing or disabled
+  route
 - `405` `{"error":"method_not_allowed","status":405}`
 - `413` `{"error":"request_too_large","status":413}`
 - `500` `{"error":"proxy_error","status":500}`
 - `502` `{"error":"upstream_unreachable","status":502}`
 - `502` `{"error":"upstream_response_too_large","status":502}`
+- `503` `{"error":"vault_locked","status":503}`
 - `504` `{"error":"upstream_timeout","status":504}`
 
 No target URL, exception detail, or header value appears in an error body.
@@ -285,6 +339,10 @@ toggle, and a test button. Filter by direction and enabled state.
 - name, description, direction
 - slug (shown for outbound) or path prefix (shown for inbound)
 - target URL
+- inbound key (shown for inbound): generate, paste, copy, and rotate. Rotation
+  replaces the old key immediately. The key is displayed after generation or
+  rotation so it can be pasted into the caller, and is otherwise masked. Saving
+  with the masked value keeps the stored key.
 - enabled and retries toggles
 - header rows with name and value, add and remove buttons
 - a visible note that inbound targets must be loopback
@@ -317,17 +375,26 @@ The auth key and decrypted headers are never logged.
   Changing either bind address requires reconsidering this.
 - The two listeners are the boundary: the outbound listener is never exposed by
   the tunnel, so `X-Proxy-Key` is not needed on `/r`.
+- The UI and login exist only on the loopback listener. There is deliberately no
+  remote or tunnel path to unlock the vault. A headless restart stays locked and
+  returns 503 until a human uses the local UI.
 - The session cookie is only as strong as the password; the tunnel terminates
-  TLS, and local access is plain HTTP on loopback. The cookie is signed with
-  `SECRET_KEY_BASE`.
+  TLS, and local access is plain HTTP on loopback. `SECRET_KEY_BASE` is generated
+  per BEAM start, so cookies do not survive a restart.
 - Injected headers can be triggered by anything that can reach loopback, so the
   injected credentials are only as protected as the machine.
 - Inbound loopback validation prevents the public tunnel from reaching LAN or
   internet hosts.
-- `encrypt_nil? false` keeps `encrypted_headers` meaningful for future cleanup
-  tasks.
-- Changing `CLOAK_KEY` makes existing headers unreadable. There is no rotation
-  task in this design.
+- Each inbound route has its own key. The caller holds a copy in its own
+  configuration, usually Smartsuite; the vault only protects the local copy.
+  Per-route keys limit the blast radius of a leaked caller config.
+- `encrypt_nil? false` keeps `encrypted_headers` and `encrypted_inbound_key`
+  meaningful for cleanup.
+- Changing the admin password rewraps the data key; it does not rotate it. Old
+  database copies remain decryptable with the old password. There is no key
+  rotation or backup/restore task.
+- Losing the password or deleting the vault means re-creating all routes after
+  resetting the database. There is no recovery path.
 
 ## Testing
 
@@ -340,20 +407,38 @@ Data and encryption:
 - Format, reserved-word, reserved-prefix, and target URL validation.
 - Unique collisions on create and update produce a form error.
 - Header names normalised to lowercase; forbidden names rejected.
-- `headers` round-trip through AshCloak.
-- Raw SQL shows the plaintext is not in `encrypted_headers`.
+- `headers` and `inbound_key` round-trip through AshCloak.
+- Raw SQL shows neither plaintext is in `encrypted_headers` or
+  `encrypted_inbound_key`.
+- Inbound key is required for enabled inbound routes and rejected for outbound.
+- Inbound keys shorter than 32 characters or longer than 256 are rejected when
+  pasted.
+- `localhost` is accepted when every resolved address is loopback; a
+  non-loopback resolution is rejected at save and at request time.
 - Defaults: enabled true, retries false.
 
 Configuration:
 
 - `OUTBOUND_PORT` defaults to 4000 and `INBOUND_PORT` to 4001; both accept a
   valid integer and reject non-numeric or out-of-range values at boot.
+- No vault key, admin password, inbound key, or `SECRET_KEY_BASE` is read from
+  the environment.
+- `ADMIN_USER` defaults to `admin` and can be overridden.
+- `SECRET_KEY_BASE` differs across BEAM starts and is shared by both endpoints.
 
 Listener isolation:
 
 - The local listener does not serve the inbound catch-all.
-- The inbound listener returns 404 for `/r/...`, `/routes`, and `/admin`.
+- The inbound listener returns 401 for `/r/...`, `/routes`, and `/admin`.
 - The inbound listener serves an unauthenticated `/health`.
+
+Locked behavior:
+
+- `/r/...` and the inbound catch-all return 503 while locked.
+- `/health` reports `vault: locked` or `vault: unlocked`.
+- UI requests with a stale generation redirect to `/login`.
+- A lock during a request returns 503 or redirects, never a
+  `CaseClauseError`.
 
 Forwarding:
 
@@ -363,7 +448,10 @@ Forwarding:
 - Injected headers override caller values.
 - Hop-by-hop headers dropped; `Host` is the target host.
 - Inbound `X-Proxy-Key` stripped.
-- Missing or wrong key → 401; no match → 404; disabled route → 404.
+- Per-route inbound keys: the right key for the matched route succeeds; another
+  route's key fails.
+- Missing or wrong key → 401; no match → 401; disabled route → 401.
+- Unknown inbound paths and bad keys are indistinguishable.
 - `CONNECT` and `TRACE` → 405.
 - Body over limit → 413; response over limit → 502.
 - Timeout → 504; refused connection → 502; other exception → 500.
@@ -375,6 +463,7 @@ Forwarding:
 LiveView:
 
 - Create, edit, disable, and delete a route.
+- Generate, rotate, reveal, and copy an inbound key.
 - Reveal a header value.
 - Test button result rendering with a stubbed upstream.
 
@@ -382,11 +471,15 @@ LiveView:
 
 ### Phase 1 — Data model and UI
 
-- Add `LocalProxy.Vault`, wire it into the supervision tree.
+- Add `LocalProxy.Vault`, `LocalProxy.Vault.KeyRing`,
+  `LocalProxy.Vault.Cipher`, `LocalProxy.Vault.Key`, and
+  `LocalProxy.Vault.LockedError`; wire the vault into the supervision tree.
+- Add `mix local_proxy.set_password` for first-run setup and rotation.
 - Add `LocalProxy.Routing.Route` and the Ash domain, with migration.
-- Add validations, identities, and AshCloak configuration.
-- Add the session sign-in plug and controllers, mount `/routes` LiveViews, and
-  protect `/admin`.
+- Add validations, identities, and AshCloak configuration for headers and
+  inbound keys.
+- Add the password sign-in, unlock flow, generation-bound `RequireAuth`,
+  LiveView mounts, and `/admin` protection.
 - Add `/health` and the root redirect.
 - Add the local endpoint and the `LocalProxyWeb.InboundEndpoint`, configured
   with `OUTBOUND_PORT` (default 4000) and `INBOUND_PORT` (default 4001) in
@@ -409,31 +502,33 @@ headers, and all outbound tests pass.
 
 ### Phase 3 — Inbound
 
-- Add `InboundAuth` and the inbound dispatcher with longest-prefix matching.
+- Add `VaultGate`, `InboundAuth`, and the inbound dispatcher with
+  longest-prefix matching plus per-route key checks.
+- Add inbound key generation, rotation, reveal, and copy to the route form.
 - Add `LocalProxyWeb.InboundEndpoint` and `InboundRouter`; move the catch-all
   there so the tunnel listener has no UI, admin, or outbound routes.
 - Add loopback target enforcement at save and request time.
-- Strip `X-Proxy-Key`, reuse the forwarder, add inbound tests.
-- Document the app-side tunnel requirement in README: the tunnel points at
-  `http://127.0.0.1:<INBOUND_PORT>` (default 4001), `X-Proxy-Key` is added to
-  inbound requests, and users visit the UI on `OUTBOUND_PORT` (default 4000).
+- Strip `X-Proxy-Key`, reuse the forwarded route assigned by `InboundAuth`, add
+  inbound tests.
+- Document in README that the tunnel points at
+  `http://127.0.0.1:<INBOUND_PORT>` (default 4001), the caller supplies the
+  route's key in `X-Proxy-Key`, and the UI is only reachable on `OUTBOUND_PORT`
+  (default 4000) locally.
 
-Done when: a request through the tunnel with the correct key reaches a local
-service, and missing/wrong keys get 401 without touching a target.
+Done when: a request through the tunnel with the correct per-route key reaches
+a local service, and an unknown path or wrong key gets 401 without touching a
+target.
 
 ## Out of scope
 
 - Websockets, SSE, and streaming bodies.
 - Multiple public hostnames and host-based routing.
 - Request history, metrics, or audit tables.
-- Multiple users, per-route keys, HMAC signing, Cloudflare Access JWT
-  verification.
+- Multiple users, HMAC signing, Cloudflare Access JWT verification.
 - CORS.
-- Cloak key rotation.
+- Data key rotation, backup, restore, or migration from `CLOAK_KEY`.
 - Import/export of route configuration.
 
 ## Open questions
 
-- `CLOAK_KEY` rotation: deferred, but a re-encrypt mix task may be wanted later.
-- `localhost` handling: if you prefer literal-only loopback targets, we can
-  reject the `localhost` hostname and require `127.0.0.1`.
+None.

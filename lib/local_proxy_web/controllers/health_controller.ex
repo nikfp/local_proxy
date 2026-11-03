@@ -3,9 +3,16 @@ defmodule LocalProxyWeb.HealthController do
 
   use LocalProxyWeb, :controller
 
+  alias LocalProxy.Vault.KeyRing
+
   def show(conn, _params) do
+    body = %{
+      "status" => "ok",
+      "vault" => if(KeyRing.locked?(), do: "locked", else: "unlocked")
+    }
+
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, ~s({"status":"ok"}))
+    |> send_resp(200, Jason.encode!(body))
   end
 end

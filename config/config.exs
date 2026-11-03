@@ -60,7 +60,7 @@ config :spark,
 
 config :local_proxy,
   ecto_repos: [LocalProxy.Repo],
-  ash_domains: [LocalProxy.Routing],
+  ash_domains: [LocalProxy.Routing, LocalProxy.Vault.Keys],
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the local endpoint (UI, admin, outbound proxy)

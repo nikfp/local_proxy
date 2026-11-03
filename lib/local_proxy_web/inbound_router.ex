@@ -11,6 +11,7 @@ defmodule LocalProxyWeb.InboundRouter do
   import Phoenix.Router
 
   pipeline :inbound_auth do
+    plug LocalProxyWeb.Plugs.VaultGate
     plug LocalProxyWeb.Plugs.InboundAuth
   end
 

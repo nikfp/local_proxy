@@ -76,6 +76,16 @@ defmodule LocalProxyWeb.ProxyControllerTest do
     assert json_response(conn, 404) == %{"error" => "no_route", "status" => 404}
   end
 
+  test "a locked vault returns 503 before route lookup", %{conn: conn} do
+    create_route()
+    LocalProxy.VaultTestHelpers.lock()
+    on_exit(&LocalProxy.VaultTestHelpers.unlock/0)
+
+    conn = get(conn, "/r/github")
+
+    assert json_response(conn, 503) == %{"error" => "vault_locked", "status" => 503}
+  end
+
   test "disabled route returns 404", %{conn: conn} do
     create_route(%{enabled: false})
     conn = get(conn, "/r/github")
@@ -87,7 +97,8 @@ defmodule LocalProxyWeb.ProxyControllerTest do
       name: "Local",
       direction: :inbound,
       path_prefix: "/api",
-      target_url: "http://localhost:3000"
+      target_url: "http://localhost:3000",
+      inbound_key: "test-inbound-key-0123456789abcdef"
     })
 
     conn = get(conn, "/r/api")

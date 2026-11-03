@@ -16,11 +16,7 @@ config :local_proxy, LocalProxy.Repo,
   pool: Ecto.Adapters.SQL.Sandbox
 
 # Fixed fixtures: tests never read real secrets from the environment.
-config :local_proxy, LocalProxy.Vault,
-  key: Base.decode64!("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
-
-config :local_proxy, :admin, user: "admin", password: "password"
-config :local_proxy, :inbound_proxy_key, "test-inbound-key"
+config :local_proxy, :admin, user: "admin"
 
 config :local_proxy, :proxy,
   upstream_timeout_ms: 30_000,
