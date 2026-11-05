@@ -34,7 +34,7 @@ defmodule LocalProxyWeb.RouteLiveTest do
   end
 
   defp first_header_row_id(view) do
-    [_, id] = Regex.run(~r/phx-value-id="(\d+)"/, render(view))
+    [_, id] = Regex.run(~r/id="header-row-(\d+)"/, render(view))
     id
   end
 
@@ -67,8 +67,17 @@ defmodule LocalProxyWeb.RouteLiveTest do
     view = choose_direction(view, "outbound")
     id = first_header_row_id(view)
 
-    view |> element("input[name=name]") |> render_change(%{"id" => id, "name" => "X-Api-Key"})
-    view |> element("input[name=value]") |> render_change(%{"id" => id, "value" => "top-secret"})
+    view
+    |> element(~s(input[name="header[#{id}][name]"]))
+    |> render_change(%{
+      "header" => %{id => %{"name" => "X-Api-Key"}}
+    })
+
+    view
+    |> element(~s(input[name="header[#{id}][value]"]))
+    |> render_change(%{
+      "header" => %{id => %{"value" => "top-secret"}}
+    })
 
     view
     |> form("#route-form",
@@ -84,6 +93,49 @@ defmodule LocalProxyWeb.RouteLiveTest do
 
     route = Routing.get_route_by_slug!("with-header", load: [:headers])
     assert route.headers["x-api-key"] == "top-secret"
+  end
+
+  test "saves headers submitted with the form without change events", %{conn: conn} do
+    {:ok, view, _html} = live(authed_conn(conn), ~p"/routes/new")
+
+    view = choose_direction(view, "outbound")
+    id = first_header_row_id(view)
+
+    view
+    |> form("#route-form",
+      route: %{
+        "name" => "Header from form",
+        "direction" => "outbound",
+        "slug" => "header-from-form",
+        "target_url" => "https://api.example.com",
+        "enabled" => "true"
+      },
+      header: %{id => %{"name" => "X-Api-Key", "value" => "top-secret"}}
+    )
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    route = Routing.get_route_by_slug!("header-from-form", load: [:headers])
+    assert route.headers["x-api-key"] == "top-secret"
+  end
+
+  test "preserves a masked header value when saving an edit", %{conn: conn} do
+    route = create_route(%{headers: %{"X-Api-Key" => "top-secret"}})
+    {:ok, view, _html} = live(authed_conn(conn), ~p"/routes/#{route.id}/edit")
+
+    id = first_header_row_id(view)
+
+    view
+    |> form("#route-form",
+      route: %{"name" => "Renamed"},
+      header: %{id => %{"name" => "x-api-key"}}
+    )
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    updated = Routing.get_route!(route.id, load: [:headers])
+    assert updated.name == "Renamed"
+    assert updated.headers["x-api-key"] == "top-secret"
   end
 
   test "edits a route", %{conn: conn} do
@@ -154,6 +206,42 @@ defmodule LocalProxyWeb.RouteLiveTest do
     assert route.inbound_key == key
   end
 
+  test "generating an inbound key preserves the rest of the form", %{conn: conn} do
+    {:ok, view, _html} = live(authed_conn(conn), ~p"/routes/new")
+
+    view = choose_direction(view, "inbound")
+
+    view
+    |> form("#route-form",
+      route: %{
+        "name" => "Local API",
+        "direction" => "inbound",
+        "path_prefix" => "/api",
+        "target_url" => "http://localhost:3000",
+        "enabled" => "true"
+      }
+    )
+    |> render_change()
+
+    html =
+      view
+      |> element("button[phx-click=generate_inbound_key]")
+      |> render_click()
+
+    assert html =~ ~s(value="Local API")
+    assert html =~ ~s(value="/api")
+    assert html =~ ~s(value="http://localhost:3000")
+
+    view
+    |> form("#route-form")
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    route = Routing.get_route_by_path_prefix!("/api", load: [:inbound_key])
+    assert route.name == "Local API"
+    assert byte_size(route.inbound_key) >= 32
+  end
+
   test "masks a stored inbound key and preserves it when saving other changes", %{conn: conn} do
     key = "test-inbound-key-0123456789abcdef"
 
@@ -179,6 +267,37 @@ defmodule LocalProxyWeb.RouteLiveTest do
     updated = Routing.get_route!(route.id, load: [:inbound_key])
     assert updated.name == "Renamed"
     assert updated.inbound_key == key
+  end
+
+  test "generating a replacement key on edit preserves the route fields", %{conn: conn} do
+    original_key = "test-inbound-key-0123456789abcdef"
+
+    route =
+      Routing.create_route!(%{
+        name: "Local",
+        direction: :inbound,
+        path_prefix: "/api",
+        target_url: "http://localhost:3000",
+        inbound_key: original_key
+      })
+
+    {:ok, view, _html} = live(authed_conn(conn), ~p"/routes/#{route.id}/edit")
+
+    view
+    |> element("button[phx-click=generate_inbound_key]")
+    |> render_click()
+
+    view
+    |> form("#route-form")
+    |> render_submit()
+
+    assert_redirect(view, ~p"/routes")
+    updated = Routing.get_route!(route.id, load: [:inbound_key])
+    assert updated.name == "Local"
+    assert updated.path_prefix == "/api"
+    assert updated.target_url == "http://localhost:3000"
+    assert updated.inbound_key != original_key
+    assert byte_size(updated.inbound_key) >= 32
   end
 
   test "reveals a stored header value without rendering it initially", %{conn: conn} do

@@ -45,11 +45,14 @@ defmodule LocalProxyWeb.RouteLive.Form do
     {:noreply, assign(socket, :form, form)}
   end
 
-  def handle_event("save", %{"route" => params}, socket) do
+  def handle_event("save", %{"route" => params} = form_params, socket) do
+    header_rows =
+      merge_submitted_headers(socket.assigns.header_rows, form_params["header"])
+
     params =
       params
       |> clear_unused_path()
-      |> Map.put("headers", headers_from_rows(socket.assigns.header_rows))
+      |> Map.put("headers", headers_from_rows(header_rows))
 
     try do
       case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
@@ -75,11 +78,7 @@ defmodule LocalProxyWeb.RouteLive.Form do
   end
 
   def handle_event("generate_inbound_key", _params, socket) do
-    form =
-      AshPhoenix.Form.validate(
-        socket.assigns.form,
-        %{"route" => %{"inbound_key" => InboundKey.generate()}}
-      )
+    form = put_inbound_key(socket.assigns.form, InboundKey.generate())
 
     {:noreply, assign(socket, form: form, inbound_key_revealed: true)}
   end
@@ -113,21 +112,12 @@ defmodule LocalProxyWeb.RouteLive.Form do
     {:noreply, update_row(socket, id, &Map.put(&1, :revealed, false))}
   end
 
-  def handle_event("header_change", %{"id" => id} = params, socket) when is_binary(id) do
-    id = String.to_integer(id)
-
-    row = Enum.find(socket.assigns.header_rows, &(&1.id == id))
-
-    row =
-      row
-      |> maybe_update(:name, params["name"])
-      |> maybe_update(:value, params["value"])
-
+  def handle_event("header_change", %{"header" => submitted}, socket) when is_map(submitted) do
     {:noreply,
      assign(
        socket,
        :header_rows,
-       Enum.map(socket.assigns.header_rows, &if(&1.id == id, do: row, else: &1))
+       merge_submitted_headers(socket.assigns.header_rows, submitted)
      )}
   end
 
@@ -142,6 +132,24 @@ defmodule LocalProxyWeb.RouteLive.Form do
       end)
     )
   end
+
+  defp merge_submitted_headers(rows, nil), do: rows
+
+  defp merge_submitted_headers(rows, submitted) when is_map(submitted) do
+    Enum.map(rows, fn row ->
+      case Map.get(submitted, Integer.to_string(row.id)) do
+        %{} = fields ->
+          row
+          |> maybe_update(:name, fields["name"])
+          |> maybe_update(:value, fields["value"])
+
+        _ ->
+          row
+      end
+    end)
+  end
+
+  defp merge_submitted_headers(rows, _submitted), do: rows
 
   defp maybe_update(row, _key, nil), do: row
   defp maybe_update(row, key, value), do: Map.put(row, key, value)
@@ -226,6 +234,22 @@ defmodule LocalProxyWeb.RouteLive.Form do
       %Phoenix.HTML.FormField{errors: errors} -> errors
       _ -> []
     end
+  end
+
+  defp put_inbound_key(%Phoenix.HTML.Form{} = form, key) do
+    params = AshPhoenix.Form.params(form)
+
+    route_params =
+      case params do
+        %{"route" => %{} = nested} -> nested
+        params when is_map(params) -> Map.reject(params, fn {name, _} -> name =~ ~r/^_/ end)
+      end
+      |> Map.put("inbound_key", key)
+
+    validation_params =
+      if match?(%{"route" => _}, params), do: %{"route" => route_params}, else: route_params
+
+    AshPhoenix.Form.validate(form, validation_params)
   end
 
   defp inbound_key_present?(%Phoenix.HTML.Form{} = form) do
@@ -452,10 +476,9 @@ defmodule LocalProxyWeb.RouteLive.Form do
               Header
               <input
                 type="text"
-                name="name"
+                name={"header[#{row.id}][name]"}
                 value={row.name}
                 phx-change="header_change"
-                phx-value-id={row.id}
                 phx-debounce="200"
                 placeholder="Authorization"
                 class="input input-sm input-bordered w-full font-mono"
@@ -468,10 +491,9 @@ defmodule LocalProxyWeb.RouteLive.Form do
                 <input
                   :if={row.revealed or row.value == ""}
                   type="text"
-                  name="value"
+                  name={"header[#{row.id}][value]"}
                   value={row.value}
                   phx-change="header_change"
-                  phx-value-id={row.id}
                   phx-debounce="200"
                   placeholder="Bearer …"
                   class="input input-sm input-bordered w-full font-mono"
